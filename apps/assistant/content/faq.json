@@ -1,0 +1,10 @@
+[
+	{
+		"patterns": ["opening hours", "business hours", "when are you open", "营业时间"],
+		"answer": "We're open Monday to Friday, nine to six, and Saturdays nine to one."
+	},
+	{
+		"patterns": ["support number", "phone number", "call you", "客服电话"],
+		"answer": "You can reach support at 400 820 8820, any day from eight to eight."
+	}
+]

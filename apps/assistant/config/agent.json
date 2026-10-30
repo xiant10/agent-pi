@@ -1,0 +1,77 @@
+{
+	"port": "${PORT:-9800}",
+	"instanceId": "${AGENT_INSTANCE_ID:-}",
+	"logLevel": "${LOG_LEVEL:-info}",
+	"storage": { "kind": "sqlite", "path": "${AGENT_DATA_DIR:-../data}/agent.sqlite" },
+	"auth": {
+		"kind": "${AUTH_KIND:-jwt}",
+		"tokens": "${AGENT_TOKENS:-}",
+		"algorithms": "${JWT_ALGORITHMS:-RS256,ES256}",
+		"jwksUrl": "${JWT_JWKS_URL:-}",
+		"hmacSecret": "${JWT_HMAC_SECRET:-}",
+		"publicKeyFiles": "${JWT_PUBLIC_KEY_FILES:-}",
+		"issuer": "${JWT_ISSUER:-}",
+		"audience": "${JWT_AUDIENCE:-}",
+		"requiredScopes": "${JWT_REQUIRED_SCOPES:-}",
+		"userClaim": "${JWT_USER_CLAIM:-sub}",
+		"tenantClaim": "${JWT_TENANT_CLAIM:-}",
+		"nameClaim": "${JWT_NAME_CLAIM:-name}",
+		"clockToleranceSec": 60
+	},
+	"models": {
+		"fast": {
+			"provider": "openai-compatible",
+			"providerId": "gateway",
+			"modelId": "${FAST_MODEL_ID:-fast}",
+			"baseUrl": "${LLM_BASE_URL:-http://llm-gateway:7200/v1}",
+			"apiKeyEnv": "LLM_API_KEY",
+			"api": "${LLM_API:-chat-completions}",
+			"contextWindow": "${FAST_MODEL_CONTEXT:-128000}",
+			"maxOutputTokens": 1024,
+			"identityHeaders": "gateway"
+		},
+		"smart": {
+			"provider": "openai-compatible",
+			"providerId": "gateway",
+			"modelId": "${SMART_MODEL_ID:-smart}",
+			"baseUrl": "${LLM_BASE_URL:-http://llm-gateway:7200/v1}",
+			"apiKeyEnv": "LLM_API_KEY",
+			"api": "${LLM_API:-chat-completions}",
+			"reasoning": "${SMART_MODEL_REASONING:-false}",
+			"contextWindow": "${SMART_MODEL_CONTEXT:-128000}",
+			"maxOutputTokens": 8192,
+			"identityHeaders": "gateway"
+		}
+	},
+	"defaultProfile": "chat",
+	"profiles": {
+		"chat": {
+			"model": "smart",
+			"thinkingLevel": "${CHAT_THINKING:-off}",
+			"maxActiveTools": 40,
+			"preload": { "maxTools": 4, "minScore": 4 }
+		},
+		"voice": {
+			"model": "fast",
+			"thinkingLevel": "off",
+			"instructionsFile": "../prompts/voice.md",
+			"maxActiveTools": 24,
+			"preload": { "maxTools": 6, "minScore": 3 },
+			"speech": true,
+			"expert": { "model": "smart", "thinkingLevel": "${EXPERT_THINKING:-high}" }
+		}
+	},
+	"instructions": [{ "name": "base", "file": "../prompts/base.md", "tag": false }],
+	"skillsDir": "../skills",
+	"mcpServers": [],
+	"limits": {
+		"maxSessionsPerUser": "${MAX_SESSIONS_PER_USER:-20}",
+		"maxConcurrentRunsPerUser": "${MAX_RUNS_PER_USER:-3}",
+		"maxConcurrentRuns": "${MAX_RUNS:-200}"
+	},
+	"http": { "path": "/agent", "allowedOrigins": "${ALLOWED_ORIGINS:-}" },
+	"durable": {
+		"stream": { "timeoutMs": 120000, "cacheRetention": "short" },
+		"compaction": { "enabled": true }
+	}
+}

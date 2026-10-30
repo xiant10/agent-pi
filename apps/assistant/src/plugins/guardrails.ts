@@ -1,0 +1,30 @@
+import { definePlugin, type ToolExecutionResult, type UserInput } from "agent-pi";
+
+/** 13 to 19 digits, optionally grouped by spaces or dashes: a payment card number. */
+const CARD = /\b(?:\d[ -]?){12,18}\d\b/;
+
+const redact = (text: string) => text.replace(new RegExp(CARD, "g"), "[card number removed]");
+
+/**
+ * Card numbers never reach the model or the transcript: they are removed from user input before the model sees it, and
+ * from tool results before they are stored. Runs first, so later plugins see redacted text too.
+ */
+export const guardrails = definePlugin({
+	name: "guardrails",
+	beforePrompt: (turn) => {
+		if (!CARD.test(turn.text)) return undefined;
+		const input: UserInput =
+			typeof turn.input === "string"
+				? redact(turn.input)
+				: turn.input.map((block) => (block.type === "text" ? { ...block, text: redact(block.text) } : block));
+		turn.log.info("guardrails.redacted", { sessionId: turn.sessionId });
+		return { input };
+	},
+	afterToolCall: (_call, result): ToolExecutionResult | undefined => {
+		if (result.content === undefined) return undefined;
+		return {
+			...result,
+			content: result.content.map((block) => (block.type === "text" ? { ...block, text: redact(block.text) } : block)),
+		};
+	},
+});

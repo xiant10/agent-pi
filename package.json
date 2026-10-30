@@ -1,0 +1,23 @@
+{
+	"name": "agent-pi-workspace",
+	"private": true,
+	"type": "module",
+	"engines": {
+		"node": ">=24.21.0"
+	},
+	"workspaces": [
+		"packages/*",
+		"apps/*"
+	],
+	"scripts": {
+		"start": "node --disable-warning=ExperimentalWarning apps/assistant/src/main.ts",
+		"check": "tsc --noEmit",
+		"smoke": "node --disable-warning=ExperimentalWarning apps/assistant/scripts/smoke.ts",
+		"test": "vitest --run"
+	},
+	"devDependencies": {
+		"@types/node": "^24.19.1",
+		"typescript": "5.9.3",
+		"vitest": "4.1.11"
+	}
+}

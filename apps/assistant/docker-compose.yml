@@ -1,0 +1,24 @@
+services:
+  agent:
+    build:
+      context: ../..
+      dockerfile: apps/assistant/Dockerfile
+    image: assistant:latest
+    restart: unless-stopped
+    env_file:
+      - path: ../../.env
+        required: false
+    environment:
+      PORT: ${PORT:-9800}
+      # Give each replica its own id and volume; session ids are prefixed with it (see docs/design.md, R5).
+      AGENT_INSTANCE_ID: ${AGENT_INSTANCE_ID:-agent-1}
+    ports:
+      - "${PORT:-9800}:${PORT:-9800}"
+    volumes:
+      - agent-data:/data
+    stop_grace_period: 30s
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  agent-data:
