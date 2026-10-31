@@ -1,8 +1,11 @@
+import type { Context } from "@earendil-works/chord";
 import { Type } from "@earendil-works/pi-ai";
-import { defineExtension, defineTool, type Extension, type ToolRegistration } from "@earendil-works/pi-durable";
+import { defineExtension, defineTool, type Extension, type ToolExecutionApi, type ToolRegistration } from "@earendil-works/pi-durable";
 import { toLlmContent } from "@earendil-works/pi-mcp";
 import type { ConversationId } from "@earendil-works/pi-durable";
+import { readSession } from "../agent/docs.ts";
 import type { GrantBroker } from "../auth/grants.ts";
+import { currentTurnRecord, HOPS_META, TURN_META } from "../identity.ts";
 import type { McpCaller, McpManager } from "../mcp/manager.ts";
 import type { CatalogEntry } from "./catalog.ts";
 
@@ -31,6 +34,19 @@ function grantCaller(grants: GrantBroker, conversationId: ConversationId): McpCa
 	};
 }
 
+/** What an agent we call needs to stay in this turn's trace and count the hops. */
+async function callMeta(api: ToolExecutionApi, context: Context): Promise<Record<string, unknown>> {
+	const session = await readSession(api, api.conversationId, context);
+	const owner = (session?.parent as ConversationId | undefined) ?? api.conversationId;
+	const turn = await currentTurnRecord(api, owner, context);
+	const hops = session?.metadata?.[HOPS_META];
+	return {
+		...(turn?.traceparent === undefined ? {} : { traceparent: turn.traceparent }),
+		...(turn === undefined ? {} : { [TURN_META]: turn.turnId }),
+		[HOPS_META]: (typeof hops === "number" ? hops : 0) + 1,
+	};
+}
+
 function mcpTool(entry: CatalogEntry, manager: McpManager, grants: GrantBroker | undefined): ToolRegistration {
 	const schema = entry.inputSchema as { properties?: Record<string, unknown> };
 	return defineTool({
@@ -47,7 +63,7 @@ function mcpTool(entry: CatalogEntry, manager: McpManager, grants: GrantBroker |
 		execute: async (args, api, context) => {
 			try {
 				const caller = grants === undefined ? undefined : grantCaller(grants, api.conversationId);
-				const result = await manager.callTool(entry, args, caller, context.abortSignal);
+				const result = await manager.callTool(entry, args, caller, context.abortSignal, () => callMeta(api, context));
 				// MCP reports tool failures in the result, not as protocol errors.
 				return { output: toLlmContent(result), isError: result.isError === true };
 			} catch (error) {

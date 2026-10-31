@@ -4,6 +4,7 @@ import { type Authenticator, AuthError, type Principal } from "../auth/authentic
 import type { AgentService } from "../service.ts";
 import type { Logger } from "../util/log.ts";
 import { traceIdOf } from "../util/tracing.ts";
+import type { McpEndpoint } from "./mcp.ts";
 import { handleStreamable, SESSION_HEADER, SUBMISSION_HEADER, toAppError, TRACE_HEADER, TURN_HEADER, writeJson } from "./streamable-http.ts";
 
 export type HttpOptions = {
@@ -16,6 +17,8 @@ export type HttpOptions = {
 	readonly allowedOrigins: readonly string[];
 	readonly keepAliveMs: number;
 	readonly maxBodyBytes: number;
+	/** The MCP endpoint, when this agent offers one. */
+	readonly mcp?: { readonly path: string; readonly endpoint: McpEndpoint };
 	/** For `/readyz`. */
 	readonly readiness: () => { readonly ready: boolean; readonly detail: unknown };
 };
@@ -82,13 +85,13 @@ async function route(
 		}
 		return writeJson(res, status, { ready, detail });
 	}
-	if (path !== options.path) return writeJson(res, 404, { error: "not_found" });
+	if (path !== options.path && path !== options.mcp?.path) return writeJson(res, 404, { error: "not_found" });
 
 	if (!applyCors(req, res, options.allowedOrigins)) return writeJson(res, 403, { error: "origin_not_allowed" });
 	if (req.method === "OPTIONS") {
 		res.writeHead(204, {
 			"access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
-			"access-control-allow-headers": `authorization, content-type, accept, last-event-id, ${SESSION_HEADER}, ${TURN_HEADER}, ${TRACE_HEADER}`,
+			"access-control-allow-headers": `authorization, content-type, accept, last-event-id, mcp-session-id, mcp-protocol-version, ${SESSION_HEADER}, ${TURN_HEADER}, ${TRACE_HEADER}`,
 			"access-control-max-age": "600",
 		});
 		res.end();
@@ -105,6 +108,7 @@ async function route(
 		return writeJson(res, error.status, { error: error.code, message: error.message }, headers);
 	}
 	onPrincipal(principal);
+	if (path === options.mcp?.path) return options.mcp.endpoint.handle(req, res, principal);
 	await handleStreamable(req, res, principal, {
 		service: options.service,
 		log: options.log,
@@ -120,6 +124,6 @@ function applyCors(req: IncomingMessage, res: ServerResponse, allowed: readonly 
 	if (!allowed.includes("*") && !allowed.includes(origin)) return false;
 	res.setHeader("access-control-allow-origin", origin);
 	res.setHeader("vary", "origin");
-	res.setHeader("access-control-expose-headers", `${SESSION_HEADER}, ${SUBMISSION_HEADER}, x-request-id, agent-instance, retry-after`);
+	res.setHeader("access-control-expose-headers", `${SESSION_HEADER}, ${SUBMISSION_HEADER}, mcp-session-id, x-request-id, agent-instance, retry-after`);
 	return true;
 }

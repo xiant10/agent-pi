@@ -1,6 +1,7 @@
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import type { ConversationId } from "@earendil-works/pi-durable";
 import { fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai";
 import { McpClient } from "@earendil-works/pi-mcp";
@@ -9,7 +10,7 @@ import type { Principal } from "../src/auth/authenticator.ts";
 import { GrantBroker, GrantError, type GrantsConfig } from "../src/auth/grants.ts";
 import { loadConfig } from "../src/config.ts";
 import { McpManager } from "../src/mcp/manager.ts";
-import { fakeMcpServer, rpc, startTestAgent, type TestAgent, TOKENS } from "../src/testing.ts";
+import { fakeMcpServer, rpc, startTestAgent, type TestAgent, testConfig, TOKENS, waitFor } from "../src/testing.ts";
 import { ToolCatalog } from "../src/tools/catalog.ts";
 import { SILENT_LOGGER } from "../src/util/log.ts";
 
@@ -100,6 +101,16 @@ describe("GrantBroker", () => {
 		expect(await grants.attach(CONVERSATION, first, user())).toEqual(first);
 		expect(auth.created).toHaveLength(1);
 		expect(auth.extended).toEqual([first.grantId]);
+	});
+
+	it("reuses a spawned agent's stored grant instead of opening another", async () => {
+		const auth = new FakeAuth();
+		const grants = broker(auth);
+		const parent = await grants.attach(CONVERSATION, undefined, user());
+		const child = 2 as ConversationId;
+		grants.attachStore(async (id) => (id === child ? { grantId: "grt_stored" } : parent));
+		expect(await grants.spawn(child, CONVERSATION)).toEqual({ grantId: "grt_stored" });
+		expect(auth.created).toHaveLength(1);
 	});
 
 	it("opens a child of a delegated caller, asking only for what it holds", async () => {
@@ -398,6 +409,142 @@ describe("a run under a grant", () => {
 		await rpc(running!.url, TOKENS.alice, "session.prompt", { sessionId, input: "ask" });
 		expect(auth.created).toHaveLength(2);
 		expect(auth.revoked).toEqual(["grt_2"]);
+	});
+
+	it("resumes a child under the same grant after a crash", async () => {
+		const auth = new FakeAuth();
+		const mcp = fakeMcpServer([{ name: "whoami", description: "Who is calling." }]);
+		const path = join(mkdtempSync(join(tmpdir(), "agent-grants-")), "agent.sqlite");
+		const config = {
+			auth: JWT_AUTH,
+			grants: CONFIG,
+			instanceId: "crash",
+			mcpServers: [{ name: "crm", transport: "http" as const, url: "http://unused", auth: "grant" as const }],
+			subagents: { research: { description: "Research.", model: "main", thinkingLevel: "off" as const, tools: ["crm:whoami"] } },
+			profiles: { chat: { ...testConfig().profiles.chat!, alwaysOnTools: ["agent_research"] } },
+		};
+		const options = { configStorage: true, grantOptions: { fetch: auth.fetch, retryDelayMs: 1 }, mcpTransport: () => mcp.transport() };
+		const first = await startTestAgent({ ...options, config: { ...config, storage: { kind: "sqlite", path } }, tokensPerSecond: 10 });
+		let childStarted = false;
+		first.faux.setResponses([
+			fauxAssistantMessage([fauxToolCall("agent_research", { task: "who" })], { stopReason: "toolUse" }),
+			() => {
+				childStarted = true;
+				return fauxAssistantMessage([fauxText("a long answer ".repeat(50))]);
+			},
+		]);
+		const sessionId = (await rpc(first.url, TOKENS.alice, "session.create", { profile: "chat" })).body.result!.sessionId as string;
+		void rpc(first.url, TOKENS.alice, "session.prompt", { sessionId, input: "go" }).catch(() => undefined);
+		await waitFor(() => childStarted);
+		await new Promise((resolve) => setTimeout(resolve, 200));
+		expect(auth.created).toHaveLength(2);
+
+		const image = join(mkdtempSync(join(tmpdir(), "agent-crash-")), "agent.sqlite");
+		const database = new DatabaseSync(path);
+		database.exec(`VACUUM INTO '${image}'`);
+		database.close();
+
+		running = await startTestAgent({
+			...options,
+			config: { ...config, storage: { kind: "sqlite", path: image } },
+			responses: [
+				fauxAssistantMessage([fauxToolCall("crm_whoami", {})], { stopReason: "toolUse" }),
+				fauxAssistantMessage([fauxText("it is alice")]),
+				fauxAssistantMessage([fauxText("done")]),
+			],
+		});
+		await waitFor(async () => (await rpc(running!.url, TOKENS.alice, "session.get", { sessionId })).body.result!.busy === false);
+		// The child's tool found its grant in storage, and the rerun neither opened another nor lost track of this one.
+		expect(mcp.calls).toEqual([{ name: "whoami", args: {} }]);
+		expect(auth.created).toHaveLength(2);
+		expect(auth.revoked).toContain("grt_2");
+		await first.close();
+	}, 15_000);
+
+	it("keeps a running child's grant across a graceful restart", async () => {
+		const auth = new FakeAuth();
+		const mcp = fakeMcpServer([{ name: "whoami", description: "Who is calling." }]);
+		const path = join(mkdtempSync(join(tmpdir(), "agent-grants-")), "agent.sqlite");
+		const config = {
+			auth: JWT_AUTH,
+			grants: CONFIG,
+			instanceId: "restart",
+			storage: { kind: "sqlite" as const, path },
+			mcpServers: [{ name: "crm", transport: "http" as const, url: "http://unused", auth: "grant" as const }],
+			subagents: { research: { description: "Research.", model: "main", thinkingLevel: "off" as const, tools: ["crm:whoami"] } },
+			profiles: { chat: { ...testConfig().profiles.chat!, alwaysOnTools: ["agent_research"] } },
+		};
+		const options = { config, configStorage: true, grantOptions: { fetch: auth.fetch, retryDelayMs: 1 }, mcpTransport: () => mcp.transport() };
+		const first = await startTestAgent({ ...options, tokensPerSecond: 10 });
+		let childStarted = false;
+		first.faux.setResponses([
+			fauxAssistantMessage([fauxToolCall("agent_research", { task: "who" })], { stopReason: "toolUse" }),
+			() => {
+				childStarted = true;
+				return fauxAssistantMessage([fauxText("a long answer ".repeat(50))]);
+			},
+		]);
+		const sessionId = (await rpc(first.url, TOKENS.alice, "session.create", { profile: "chat" })).body.result!.sessionId as string;
+		void rpc(first.url, TOKENS.alice, "session.prompt", { sessionId, input: "go" }).catch(() => undefined);
+		await waitFor(() => childStarted);
+		await new Promise((resolve) => setTimeout(resolve, 200));
+		await first.close();
+		expect(auth.revoked).toEqual([]);
+
+		running = await startTestAgent({
+			...options,
+			responses: [
+				fauxAssistantMessage([fauxToolCall("crm_whoami", {})], { stopReason: "toolUse" }),
+				fauxAssistantMessage([fauxText("it is alice")]),
+				fauxAssistantMessage([fauxText("done")]),
+			],
+		});
+		await waitFor(async () => (await rpc(running!.url, TOKENS.alice, "session.get", { sessionId })).body.result!.busy === false);
+		expect(mcp.calls).toEqual([{ name: "whoami", args: {} }]);
+		expect(auth.created).toHaveLength(2);
+		expect(auth.revoked).toEqual(["grt_2"]);
+	}, 15_000);
+
+	it("ends a child's grant when its parent is cancelled", async () => {
+		const auth = new FakeAuth();
+		const config = {
+			auth: JWT_AUTH,
+			grants: CONFIG,
+			subagents: { research: { description: "Research.", model: "main", thinkingLevel: "off" as const, tools: [] } },
+			profiles: { chat: { ...testConfig().profiles.chat!, alwaysOnTools: ["agent_research"] } },
+		};
+		running = await startTestAgent({ config, tokensPerSecond: 10, grantOptions: { fetch: auth.fetch, retryDelayMs: 1 } });
+		let childStarted = false;
+		running.faux.setResponses([
+			fauxAssistantMessage([fauxToolCall("agent_research", { task: "who" })], { stopReason: "toolUse" }),
+			() => {
+				childStarted = true;
+				return fauxAssistantMessage([fauxText("a long answer ".repeat(50))]);
+			},
+		]);
+		const sessionId = (await rpc(running.url, TOKENS.alice, "session.create", { profile: "chat" })).body.result!.sessionId as string;
+		void rpc(running.url, TOKENS.alice, "session.prompt", { sessionId, input: "go" }).catch(() => undefined);
+		await waitFor(() => childStarted);
+		await rpc(running.url, TOKENS.alice, "session.cancel", { sessionId });
+		await waitFor(() => auth.revoked.includes("grt_2"));
+	});
+
+	it("opens a child grant for a delegated MCP call, and ends it with the call", async () => {
+		const auth = new FakeAuth();
+		running = await startTestAgent({
+			config: { auth: JWT_AUTH, grants: CONFIG, mcpEndpoint: { path: "/mcp", tools: [{ name: "ask", description: "Ask." }] } },
+			authenticator: { authenticate: async () => delegated("grt_call") },
+			grantOptions: { fetch: auth.fetch, retryDelayMs: 1 },
+		});
+		running.faux.setResponses([fauxAssistantMessage([fauxText("done")])]);
+		const response = await fetch(running.url.replace(/\/agent$/, "/mcp"), {
+			method: "POST",
+			headers: { "content-type": "application/json", accept: "application/json", authorization: "Bearer any" },
+			body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "ask", arguments: { task: "go" } } }),
+		});
+		expect(JSON.stringify(await response.json())).toContain("done");
+		expect(auth.created).toEqual([expect.objectContaining({ subject_token: "delegated-grt_call", actions: ["agent:use"], audiences: ["agent-pi"] })]);
+		expect(auth.revoked).toEqual(["grt_1"]);
 	});
 
 	it("revokes the grant when the session closes", async () => {

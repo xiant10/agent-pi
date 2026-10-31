@@ -15,6 +15,10 @@ export type SessionState = {
 	grantId?: string;
 	/** The caller's grant, when grantId is a child of it. */
 	grantParent?: string;
+	/** Set on a child conversation: the session it works for. Clients can read a child, but not drive it. */
+	parent?: number;
+	/** The newest child conversations of this session. */
+	subagents?: number[];
 } & JsonObject;
 
 export const SessionDoc = defineDoc<SessionState>({
@@ -32,7 +36,7 @@ type SessionReader = {
 	snapshot(doc: typeof SessionDoc, conversationId: ConversationId, context: Context): Promise<Readonly<SessionState> | undefined>;
 };
 
-/** The session of a conversation, or undefined for one that is not a session, such as a consulted expert's. */
+/** The session of a conversation, or undefined for one that is not a session. */
 export async function readSession(
 	reader: SessionReader,
 	conversationId: ConversationId,

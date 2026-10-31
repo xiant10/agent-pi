@@ -62,6 +62,10 @@ export const GATEWAY_IDENTITY_HEADERS: IdentityHeaderNames = {
 	userName: "X-User-Name",
 };
 
+/** `_meta` keys of a `tools/call` between agents. */
+export const TURN_META = "agent-pi/turnId";
+export const HOPS_META = "agent-pi/hops";
+
 const TURN_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 
 /** Whether a client-supplied turn id is safe as a header value and log key. */
@@ -153,20 +157,6 @@ export async function currentTurnRecord(
 /** Identities of the conversations that are generating, by the provider session id pi-durable passes to the model. */
 export class IdentityRegistry {
 	readonly #byProviderSession = new Map<string, CallContext>();
-	readonly #parents = new Map<ConversationId, ConversationId>();
-
-	/** A child conversation, such as a consulted expert, makes its model calls for its parent's session and turn. */
-	adopt(child: ConversationId, parent: ConversationId): void {
-		this.#parents.set(child, parent);
-	}
-
-	release(child: ConversationId): void {
-		this.#parents.delete(child);
-	}
-
-	parentOf(conversationId: ConversationId): ConversationId | undefined {
-		return this.#parents.get(conversationId);
-	}
 
 	set(providerSessionId: string, identity: CallContext): void {
 		this.#byProviderSession.delete(providerSessionId);
@@ -279,9 +269,10 @@ export function identityExtension(
 		hooks: [
 			hook(GenerationTask, {
 				beforeRequest: async (_request, api, context) => {
-					const owner = registry.parentOf(api.conversationId) ?? api.conversationId;
-					const session = await readSession(api, owner, context);
+					const session = await readSession(api, api.conversationId, context);
 					if (session === undefined) return undefined;
+					// A child conversation makes its model calls for its parent's session and turn.
+					const owner = (session.parent as ConversationId | undefined) ?? api.conversationId;
 					const provider = await api.snapshot(ProviderDoc, api.conversationId, context);
 					if (provider === undefined) return undefined;
 					const principal = credentials.get(api.conversationId);

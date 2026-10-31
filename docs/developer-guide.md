@@ -186,6 +186,45 @@ reasoning `chat` profile and a fast `voice` profile:
 | `thinkingEvents` | `false` | Emit `thinking.delta` events |
 | `expert` | none | `{ model, thinkingLevel }`: offer `consult_expert`, which asks a stronger model in a child conversation |
 
+## Sub-agents
+
+A sub-agent takes a task in a child conversation with its own model, instructions, and tools, so long or noisy work
+stays out of the main context. Declare it at the top level of the config:
+
+```json
+"subagents": {
+	"research": {
+		"description": "Research a question across CRM and tickets. Give it the full question; it cannot see this chat.",
+		"model": "smart",
+		"thinkingLevel": "medium",
+		"instructionsFile": "../prompts/research.md",
+		"tools": ["crm_*", "search_tools"],
+		"timeoutMs": 120000
+	}
+}
+```
+
+It becomes the catalog tool `agent_research`, which takes a `task`. Offer it like any tool: `alwaysOnTools`, a skill's
+`tools`, or search. `tools` is the child's starting set, and empty means none. A child cannot delegate further, and
+`limits.maxSubagentsPerSession` (default 3) caps how many run at once. `session.get` lists a session's `subagents`; a
+client can read those ids with `session.get` and the `GET` event stream, but cannot drive them. The server name `agents`
+is reserved. See [delegation.md](delegation.md) for the design.
+
+## Offering an agent over MCP
+
+An agent can offer itself to MCP clients and other agents. Set `mcpEndpoint`:
+
+```json
+"mcpEndpoint": {
+	"tools": [{ "name": "ask_assistant", "description": "Ask the assistant about accounts.", "profile": "chat" }]
+}
+```
+
+`/mcp` (or `path`) then serves Streamable HTTP behind the agent's authenticator. Each tool takes a `task`, runs it in a
+one-shot session under the chosen profile, and returns the answer. Plugins, limits, and grants apply as on `/agent`.
+Another agent calls it with an `mcpServers` entry; add `"agentContext": true` to keep its work in the caller's trace and
+count hops. See [delegation.md](delegation.md).
+
 ## Tools: MCP servers and the active set
 
 Tools come from MCP servers and from plugins. All of them are registered; each session is **offered** only a small

@@ -7,6 +7,7 @@ A reusable multi-user agent harness on [`@earendil-works/pi-durable`](https://ww
 - **Steering and barge-in**: `session.steer` joins running work; `session.interrupt` stops it and answers the new input.
 - **Skills** that load instructions and activate their tools on demand.
 - **Hundreds of MCP tools**: all registered, few offered per request, found by skills, search, or preloading.
+- **Delegation**: declared sub-agents as tools, and an agent offered to others over MCP. See [docs/delegation.md](docs/delegation.md).
 - **Voice output**: `speech` events carry speakable sentences as they stream; a fast model talks, `consult_expert` reasons.
 - **Durable**: sessions, runs, and tool calls are committed to SQLite; a restarted container continues unfinished runs.
 - **Plugins and IoC**: business logic lives in the app; the harness exposes hooks before and after the model, around

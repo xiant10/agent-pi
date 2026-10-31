@@ -31,7 +31,25 @@ export type LimitsConfig = {
 	readonly maxConcurrentRuns: number;
 	readonly maxInputChars: number;
 	readonly maxBodyBytes: number;
+	/** Child conversations running at once per session, `consult_expert` included. */
+	readonly maxSubagentsPerSession: number;
 };
+
+/** A sub-agent, offered as the catalog tool `agent_<name>`. */
+export type SubagentConfig = {
+	readonly description: string;
+	readonly model: string;
+	readonly thinkingLevel: ModelThinkingLevel;
+	readonly instructions?: string;
+	readonly tools: readonly string[];
+	readonly timeoutMs?: number;
+};
+
+/** A capability this agent offers MCP clients: one tool taking a `task`. */
+export type ExposedToolConfig = { readonly name: string; readonly description: string; readonly profile?: string };
+
+/** The agent's own MCP endpoint. */
+export type McpEndpointConfig = { readonly path: string; readonly tools: readonly ExposedToolConfig[] };
 
 /** A plugin an agent runs: `use` names an entry of the `PluginCatalog` given at startup. */
 export type PluginRef = { readonly use: string; readonly options: JsonObject };
@@ -52,12 +70,15 @@ export type AppConfig = {
 	readonly models: Readonly<Record<string, ModelConfig>>;
 	readonly profiles: Readonly<Record<string, ProfileConfig>>;
 	readonly defaultProfile: string;
+	readonly subagents: Readonly<Record<string, SubagentConfig>>;
 	readonly instructions: readonly InstructionSection[];
 	/** Run before the plugins passed in code, in this order. */
 	readonly plugins: readonly PluginRef[];
 	readonly skillsDir?: string;
 	readonly mcpServers: readonly McpServerConfig[];
 	readonly limits: LimitsConfig;
+	/** Offer this agent over MCP; off when unset. */
+	readonly mcpEndpoint?: McpEndpointConfig;
 	readonly http: { readonly path: string; readonly allowedOrigins: readonly string[]; readonly keepAliveMs: number };
 	readonly durable: {
 		readonly stream: { readonly timeoutMs?: number; readonly cacheRetention?: "none" | "short" | "long" };
@@ -71,6 +92,7 @@ export type AppConfig = {
 
 const PLACEHOLDER = /\$\{([A-Za-z_][A-Za-z0-9_]*)(:-([^}]*))?\}/g;
 const AGENT_NAME = /^[a-z][a-z0-9_-]*$/;
+const EXPOSED_TOOL_NAME = /^[A-Za-z0-9_-]{1,64}$/;
 const SECTION_NAME = /^[a-z][a-z0-9_-]*$/;
 const RESERVED_SECTIONS = new Set(["instructions", "skills", "profile"]);
 const THINKING: readonly ModelThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
@@ -273,6 +295,23 @@ export function loadConfig(path: string): AppConfig {
 	const defaultProfile = r.optionalString(raw.defaultProfile, "defaultProfile") ?? Object.keys(profiles)[0] ?? "";
 	if (profiles[defaultProfile] === undefined) r.fail("defaultProfile", "must name a configured profile");
 
+	const subagents: Record<string, SubagentConfig> = {};
+	for (const [name, value] of Object.entries(r.optionalObject(raw.subagents, "subagents"))) {
+		const at = `subagents.${name}`;
+		if (!AGENT_NAME.test(name)) r.fail(at, `name must match ${AGENT_NAME}`);
+		const s = r.object(value, at);
+		const instructionsFile = r.optionalString(s.instructionsFile, `${at}.instructionsFile`);
+		const timeoutMs = r.optionalNumber(s.timeoutMs, `${at}.timeoutMs`);
+		subagents[name] = {
+			description: r.string(s.description, `${at}.description`),
+			model: modelName(s.model, `${at}.model`),
+			thinkingLevel: r.oneOf(s.thinkingLevel, `${at}.thinkingLevel`, THINKING, "off"),
+			...(instructionsFile === undefined ? {} : { instructions: readText(instructionsFile, `${at}.instructionsFile`) }),
+			tools: r.strings(s.tools, `${at}.tools`),
+			...(timeoutMs === undefined ? {} : { timeoutMs }),
+		};
+	}
+
 	const instructions: InstructionSection[] = [];
 	for (const [index, value] of (Array.isArray(raw.instructions) ? raw.instructions : []).entries()) {
 		const at = `instructions[${index}]`;
@@ -291,6 +330,8 @@ export function loadConfig(path: string): AppConfig {
 	const mcpServers = (Array.isArray(raw.mcpServers) ? raw.mcpServers : []).map((value, index) =>
 		parseMcpServer(r, value, `mcpServers[${index}]`),
 	);
+
+	const mcpEndpoint = raw.mcpEndpoint === undefined ? undefined : parseMcpEndpoint(r, raw.mcpEndpoint);
 
 	const plugins = (Array.isArray(raw.plugins) ? raw.plugins : []).map((value, index) => {
 		const entry = r.object(value, `plugins[${index}]`);
@@ -330,6 +371,7 @@ export function loadConfig(path: string): AppConfig {
 		models,
 		profiles,
 		defaultProfile,
+		subagents,
 		instructions,
 		plugins,
 		...(skillsDir === undefined ? {} : { skillsDir: file(skillsDir) }),
@@ -340,7 +382,9 @@ export function loadConfig(path: string): AppConfig {
 			maxConcurrentRuns: r.number(limits.maxConcurrentRuns, "limits.maxConcurrentRuns", 200),
 			maxInputChars: r.number(limits.maxInputChars, "limits.maxInputChars", 32_000),
 			maxBodyBytes: r.number(limits.maxBodyBytes, "limits.maxBodyBytes", 1_000_000),
+			maxSubagentsPerSession: r.number(limits.maxSubagentsPerSession, "limits.maxSubagentsPerSession", 3),
 		},
+		...(mcpEndpoint === undefined ? {} : { mcpEndpoint }),
 		http: {
 			path: r.optionalString(http.path, "http.path") ?? "/agent",
 			allowedOrigins: r.strings(http.allowedOrigins, "http.allowedOrigins"),
@@ -405,6 +449,20 @@ function parseIdentityHeaders(r: Reader, value: unknown, at: string): IdentityHe
 
 const IDENTITY_FIELDS: readonly string[] = ["agent", "sessionId", "turnId", "userId", "userName", "tenantId"];
 
+function parseMcpEndpoint(r: Reader, value: unknown): McpEndpointConfig {
+	const at = "mcpEndpoint";
+	const endpoint = r.object(value, at);
+	if (!Array.isArray(endpoint.tools) || endpoint.tools.length === 0) r.fail(`${at}.tools`, "must list at least one tool");
+	const tools = endpoint.tools.map((tool: unknown, index: number) => {
+		const t = r.object(tool, `${at}.tools[${index}]`);
+		const name = r.string(t.name, `${at}.tools[${index}].name`);
+		if (!EXPOSED_TOOL_NAME.test(name)) r.fail(`${at}.tools[${index}].name`, `must match ${EXPOSED_TOOL_NAME}`);
+		const profile = r.optionalString(t.profile, `${at}.tools[${index}].profile`);
+		return { name, description: r.string(t.description, `${at}.tools[${index}].description`), ...(profile === undefined ? {} : { profile }) };
+	});
+	return { path: r.optionalString(endpoint.path, `${at}.path`) ?? "/mcp", tools };
+}
+
 function parseMcpServer(r: Reader, value: unknown, at: string): McpServerConfig {
 	const s = r.object(value, at);
 	const name = r.string(s.name, `${at}.name`);
@@ -439,6 +497,7 @@ function parseMcpServer(r: Reader, value: unknown, at: string): McpServerConfig 
 		};
 	}
 	const tokenHeader = r.optionalString(s.tokenHeader, `${at}.tokenHeader`);
+	const agentContext = r.boolean(s.agentContext, `${at}.agentContext`, false);
 	return {
 		...common,
 		transport,
@@ -446,5 +505,6 @@ function parseMcpServer(r: Reader, value: unknown, at: string): McpServerConfig 
 		headers: stringMap(s.headers, `${at}.headers`),
 		auth: r.oneOf(s.auth, `${at}.auth`, ["static", "grant"] as const, "static"),
 		...(tokenHeader === undefined ? {} : { tokenHeader }),
+		...(agentContext ? { agentContext } : {}),
 	};
 }

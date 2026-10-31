@@ -389,8 +389,8 @@ Which hooks each bundled plugin implements:
 - **Credentials are time-limited.** `principal` can be absent in resumed runs, and after 30 minutes without a request
   on an idle session. Hooks that need the caller must handle `undefined`.
 - **Identity reaches the gateway.** Each model call carries session, turn and user ids as headers; a plugin can
-  customize them by binding `Services.identityHeaders` in `register()`. A child conversation such as `consult_expert`
-  calls for its parent's session and turn.
+  customize them by binding `Services.identityHeaders` in `register()`. A child conversation (a sub-agent or
+  `consult_expert`) calls for its parent's session and turn.
 - **Spans must not come from durable hooks.** Hooks can replay, which would report work twice. `agent.submission` is
   opened at admission, unless the input is a retry; `agent.model` wraps the provider call itself (`withModelSpans`), so
   a request sent twice shows twice; `agent.tool` comes from the event stream (`toolSpans`), upstream of `mapEvent`.

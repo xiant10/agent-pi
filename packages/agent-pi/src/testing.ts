@@ -89,10 +89,11 @@ export function testConfig(overrides: Partial<AppConfig> = {}): AppConfig {
 			voice: { ...PROFILE, speech: true, preload: { maxTools: 3, minScore: 1 }, instructions: "Speak briefly." },
 		},
 		defaultProfile: "chat",
+		subagents: {},
 		instructions: [{ name: "base", content: "You are a helpful assistant.", tag: false }],
 		plugins: [],
 		mcpServers: [],
-		limits: { maxSessionsPerUser: 5, maxConcurrentRunsPerUser: 3, maxConcurrentRuns: 50, maxInputChars: 10_000, maxBodyBytes: 1_000_000 },
+		limits: { maxSessionsPerUser: 5, maxConcurrentRunsPerUser: 3, maxConcurrentRuns: 50, maxInputChars: 10_000, maxBodyBytes: 1_000_000, maxSubagentsPerSession: 3 },
 		http: { path: "/agent", allowedOrigins: [], keepAliveMs: 15_000 },
 		durable: { stream: {}, compaction: { enabled: false }, retry: { maxRetries: 0 } },
 		logLevel: "error",
@@ -122,6 +123,8 @@ export async function startTestAgent(options: {
 	readonly mcp?: ReturnType<typeof fakeMcpServer>;
 	readonly skills?: readonly Skill[];
 	readonly tokensPerSecond?: number;
+	/** Scripted before the agent starts, for runs it resumes during startup. */
+	readonly responses?: readonly FauxResponseStep[];
 	/** Use the config's storage instead of a fresh MemoryStorage, to test restarts. */
 	readonly configStorage?: boolean;
 	/** Use this storage instead of a fresh MemoryStorage. */
@@ -134,6 +137,7 @@ export async function startTestAgent(options: {
 	readonly pluginCatalog?: PluginCatalog;
 } = {}): Promise<TestAgent> {
 	const faux = fauxProvider(options.tokensPerSecond === undefined ? {} : { tokensPerSecond: options.tokensPerSecond });
+	if (options.responses !== undefined) faux.setResponses([...options.responses]);
 	const models = createModels();
 	models.setProvider(faux.provider);
 	const config = testConfig({

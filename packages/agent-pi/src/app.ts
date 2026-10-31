@@ -17,6 +17,7 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import { coreExtension, instructionsExtension } from "./agent/core-extension.ts";
 import { createConfiguredModels } from "./agent/models.ts";
 import type { Profile } from "./agent/profiles.ts";
+import { ChildSlots, SUBAGENT_PARAMETERS, SUBAGENT_SERVER, type Subagent, subagentToolName } from "./agent/subagents.ts";
 import { parkedTasks } from "./agent/parked.ts";
 import { readSession } from "./agent/docs.ts";
 import type { Authenticator } from "./auth/authenticator.ts";
@@ -24,7 +25,7 @@ import { CredentialStore } from "./auth/credentials.ts";
 import { GrantBroker, type GrantBrokerOptions } from "./auth/grants.ts";
 import { JwtAuthenticator } from "./auth/jwt.ts";
 import { StaticTokenAuthenticator } from "./auth/static-token.ts";
-import type { AppConfig } from "./config.ts";
+import type { AppConfig, McpEndpointConfig } from "./config.ts";
 import { HubRegistry } from "./events/hub.ts";
 import { defaultTransport, McpManager } from "./mcp/manager.ts";
 import { Container } from "./plugins/container.ts";
@@ -35,9 +36,10 @@ import type { AgentPlugin, PluginCatalog } from "./plugins/types.ts";
 import { AgentService } from "./service.ts";
 import { resolveInstance, SessionStore } from "./sessions.ts";
 import { discoverSkills, type Skill } from "./skills/skills.ts";
-import { ToolCatalog } from "./tools/catalog.ts";
+import { type CatalogEntry, ToolCatalog } from "./tools/catalog.ts";
 import { mcpExtension, mcpExtensionName } from "./tools/mcp-extension.ts";
 import { createHttpServer } from "./transport/http.ts";
+import { McpEndpoint } from "./transport/mcp.ts";
 import { CORE_METHODS } from "./transport/streamable-http.ts";
 import { createLogger, type Logger } from "./util/log.ts";
 
@@ -88,6 +90,7 @@ export type RunningAgent = {
  * resume and the server listens.
  */
 export async function startAgent(config: AppConfig, options: StartOptions = {}): Promise<RunningAgent> {
+	if (config.mcpEndpoint !== undefined) checkMcpEndpoint(config, config.mcpEndpoint);
 	const context = BACKGROUND_CONTEXT;
 	const container = new Container();
 	bindDefaults(container, config, options);
@@ -114,22 +117,40 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 	if (grants !== undefined && config.auth.kind !== "jwt") throw new Error("grants needs auth.kind jwt");
 	// Plugins with in-process tools are catalog servers themselves; a plugin without tools may name its MCP server after itself.
 	const pluginServers = new Set(plugins.toolEntries().keys());
+	if (pluginServers.has(SUBAGENT_SERVER)) throw new Error(`plugin ${SUBAGENT_SERVER}: that name is reserved for sub-agents`);
 	for (const server of mcpServers) {
 		if (pluginServers.has(server.name)) throw new Error(`MCP server ${server.name} has the name of a plugin with tools`);
+		if (server.name === SUBAGENT_SERVER) throw new Error(`MCP server ${server.name}: that name is reserved for sub-agents`);
 	}
 	const mcp = new McpManager(mcpServers, { catalog, log, createTransport: await container.get(Services.mcpTransport) });
 
 	// Extension order is prompt order: configured instructions, plugin sections, then the skill index and profile.
+	let closing = false;
+	let failed = false;
 	const identity = await container.get(Services.identity);
+	const subagents = buildSubagents(config, (await container.get(Services.models)).refs);
 	const registry = createRegistry();
 	registry.install(instructionsExtension(config.instructions));
 	for (const extension of plugins.extensions(profileOf, credentials)) registry.install(extension);
-	registry.install(coreExtension({ skills, profiles, defaultProfile, profileOf, catalog, credentials, identity, ...(grants === undefined ? {} : { grants }) }));
+	registry.install(
+		coreExtension({
+			skills,
+			profiles,
+			defaultProfile,
+			profileOf,
+			catalog,
+			subagents,
+			credentials,
+			slots: new ChildSlots(config.limits.maxSubagentsPerSession),
+			stopping: () => closing || failed,
+			...(grants === undefined ? {} : { grants }),
+		}),
+	);
 	registry.install(identityExtension(identity, config.agent, (id) => store.publicId(id), credentials));
 	// A server's tools enter the registry as one extension, replaced in place when the server re-lists its tools.
 	// Plugins' in-process tools are catalogued too, so skills and search find them, but their extension holds the code.
 	catalog.onChange((server) => {
-		if (pluginServers.has(server)) return;
+		if (pluginServers.has(server) || server === SUBAGENT_SERVER) return;
 		const entries = catalog.entries(server);
 		if (entries.length === 0) registry.uninstall(defineExtension({ name: mcpExtensionName(server) }));
 		else registry.install(mcpExtension(server, entries, mcp, grants));
@@ -139,6 +160,9 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 		if (conflicts.length > 0) throw new Error(`plugin ${plugin}: tool names already taken: ${conflicts.join(", ")}`);
 	}
 
+	const conflicts = catalog.setServer(SUBAGENT_SERVER, subagents.map(subagentEntry));
+	if (conflicts.length > 0) throw new Error(`subagents: tool names already taken: ${conflicts.join(", ")}`);
+
 	const storage = await container.get(Services.storage);
 	const settings: HarnessSettings = {
 		stream: config.durable.stream,
@@ -147,7 +171,6 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 		...(config.durable.restartLimit === undefined ? {} : { restartLimit: config.durable.restartLimit }),
 	};
 	const failure = Promise.withResolvers<unknown>();
-	let failed = false;
 	const { models } = await container.get(Services.models);
 	const harness = await Harness.open(
 		storage,
@@ -210,7 +233,7 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 	await mcp.start(options.mcpStartupWaitMs ?? 10_000);
 
 	const authenticator = plugins.authenticator(await container.get(Services.authenticator));
-	let closing = false;
+	const mcpEndpoint = config.mcpEndpoint;
 	const server = createHttpServer({
 		authenticator,
 		service,
@@ -219,6 +242,14 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 		allowedOrigins: config.http.allowedOrigins,
 		keepAliveMs: config.http.keepAliveMs,
 		maxBodyBytes: config.limits.maxBodyBytes,
+		...(mcpEndpoint === undefined
+			? {}
+			: {
+					mcp: {
+						path: mcpEndpoint.path,
+						endpoint: new McpEndpoint({ agent: config.agent, tools: mcpEndpoint.tools, service, log, keepAliveMs: config.http.keepAliveMs, maxBodyBytes: config.limits.maxBodyBytes }),
+					},
+				}),
 		readiness: () => ({ ready: !closing && !failed, detail: { agent: config.agent, instanceId, tools: catalog.size, mcp: mcp.status() } }),
 	});
 	// Tokens of sessions nobody has called for a while leave memory; a working session keeps its caller's token.
@@ -315,6 +346,37 @@ function buildProfiles(config: AppConfig, refs: ReadonlyMap<string, ModelRef>): 
 		});
 	}
 	return profiles;
+}
+
+function checkMcpEndpoint(config: AppConfig, endpoint: McpEndpointConfig): void {
+	if (endpoint.path === config.http.path) throw new Error(`mcpEndpoint.path is http.path: ${endpoint.path}`);
+	const names = new Set<string>();
+	for (const tool of endpoint.tools) {
+		if (names.has(tool.name)) throw new Error(`mcpEndpoint: two tools named ${tool.name}`);
+		names.add(tool.name);
+		if (tool.profile !== undefined && config.profiles[tool.profile] === undefined) {
+			throw new Error(`mcpEndpoint tool ${tool.name}: unknown profile ${tool.profile}`);
+		}
+	}
+}
+
+function buildSubagents(config: AppConfig, refs: ReadonlyMap<string, ModelRef>): Subagent[] {
+	return Object.entries(config.subagents).map(([name, subagent]) => {
+		const model = refs.get(subagent.model);
+		if (model === undefined) throw new Error(`subagents.${name}: model ${subagent.model} is not configured`);
+		return { ...subagent, name, model };
+	});
+}
+
+function subagentEntry(subagent: Subagent): CatalogEntry {
+	const name = subagentToolName(subagent);
+	return {
+		name,
+		server: SUBAGENT_SERVER,
+		mcpName: name,
+		description: subagent.description,
+		inputSchema: SUBAGENT_PARAMETERS as unknown as Record<string, unknown>,
+	};
 }
 
 function uniqueSkills(skills: readonly Skill[]): Skill[] {

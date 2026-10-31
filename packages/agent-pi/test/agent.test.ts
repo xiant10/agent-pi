@@ -46,7 +46,7 @@ describe("auth and ownership", () => {
 	});
 
 	it("enforces the per-user session limit", async () => {
-		running = await startTestAgent({ config: { limits: { maxSessionsPerUser: 1, maxConcurrentRunsPerUser: 3, maxConcurrentRuns: 50, maxInputChars: 100, maxBodyBytes: 100_000 } } });
+		running = await startTestAgent({ config: { limits: { maxSessionsPerUser: 1, maxConcurrentRunsPerUser: 3, maxConcurrentRuns: 50, maxInputChars: 100, maxBodyBytes: 100_000, maxSubagentsPerSession: 3 } } });
 		await createSession(running);
 		const second = await rpc(running.url, TOKENS.alice, "session.create");
 		expect(second.status).toBe(429);

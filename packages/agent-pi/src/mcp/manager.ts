@@ -34,6 +34,8 @@ export type McpServerConfig =
 			 */
 			readonly auth?: "static" | "grant";
 			readonly tokenHeader?: string;
+			/** The server is another agent: `tools/call` carries the trace, turn, and hop count in `_meta`. */
+			readonly agentContext?: boolean;
 	  })
 	| (CommonServerConfig & {
 			readonly transport: "stdio";
@@ -161,25 +163,32 @@ export class McpManager {
 		args: Record<string, unknown>,
 		caller: McpCaller | undefined,
 		signal: AbortSignal | undefined,
+		meta?: () => Promise<Record<string, unknown>>,
 	): Promise<CallToolResult> {
 		const server = this.#servers.get(entry.server);
 		if (server === undefined) throw new McpUnavailableError(`MCP server ${entry.server} is not configured`);
 		const config = server.config;
-		const options = { timeoutMs: config.callTimeoutMs ?? 30_000, ...(signal === undefined ? {} : { signal }) };
+		// Asking for progress makes the timeout an idle one: a server still working renews it.
+		const options = { timeoutMs: config.callTimeoutMs ?? 30_000, onProgress: () => undefined, ...(signal === undefined ? {} : { signal }) };
+		const _meta = config.transport === "http" && config.agentContext === true ? await meta?.() : undefined;
+		const call = (client: McpClient) =>
+			_meta === undefined
+				? client.callTool(entry.mcpName, args, options)
+				: client.request<CallToolResult>("tools/call", { name: entry.mcpName, arguments: args, _meta }, options);
 		if (config.transport === "http" && config.auth === "grant") {
 			const key = await caller?.key();
 			if (caller === undefined || key === undefined) throw new McpUnavailableError("This tool needs an agent grant, and this run has none.");
 			const user = this.#grantClient(server, key, await caller.token());
 			user.calls++;
 			try {
-				return await (await user.client).callTool(entry.mcpName, args, options);
+				return await call(await user.client);
 			} finally {
 				user.calls--;
 				if (user.retired && user.calls === 0) this.#closeClient(user);
 			}
 		}
 		const client = server.client ?? (await this.#connect(server));
-		return client.callTool(entry.mcpName, args, options);
+		return call(client);
 	}
 
 	async close(): Promise<void> {

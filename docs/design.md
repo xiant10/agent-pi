@@ -117,7 +117,7 @@ events ─► EventMapper ─► plugin.mapEvent × n ─► SSE
 ```
 
 Model and tool hooks are pi-durable `GenerationTask` and `ToolTask` hooks in one extension per plugin
-(`plugin.<name>`), which every conversation selects, including the `consult_expert` child. They run inside durable
+(`plugin.<name>`), which every conversation selects, including child conversations. They run inside durable
 task phases that replay after a crash, so they get read-only state and `memo()`. `beforeModelRequest` changes one
 request and stores nothing, which keeps the transcript and the provider's cached prefix stable.
 
@@ -294,7 +294,8 @@ Speed, in order of impact:
 Reasoning without making every turn slow: the voice profile can enable `consult_expert`, which runs a child
 conversation (durable ownership: aborting the parent call aborts the child) on the profile's `expertModel` with
 thinking enabled, and returns its conclusion. The fast model answers simple turns itself and delegates hard ones;
-the voice app can play a filler phrase on `tool.started` for `consult_expert`.
+the voice app can play a filler phrase on `tool.started` for `consult_expert`. It is one case of a sub-agent; see
+[delegation.md](delegation.md).
 
 ## R5: multi-user and scaling
 
@@ -315,7 +316,8 @@ the voice app can play a filler phrase on `tool.started` for `consult_expert`.
 - Credentials for MCP: servers with `auth: "grant"` receive a short token minted from the conversation's agent grant,
   never the caller's. `GrantBroker` opens or extends the grant on each user request, and stores only its ID on the
   session, so a run continues with the user offline and resumes after a restart. A LiveKit caller's grant gets a child,
-  which can't extend past its parent. `consult_expert` gets its own child grant, ended when it answers. A tool error
+  which can't extend past its parent. A sub-agent gets its own child grant, stored on its session and ended when it
+  settles. A tool error
   tells the model when a grant has expired or was stopped. The latest verified principal per session is still kept in
   memory, only for plugins and audit headers.
 - Several agents: one runtime and one image, with one process per agent config. A process is the unit of failure, so
@@ -353,10 +355,11 @@ Paths are under `packages/agent-pi/src/` unless noted.
 | Auth | `auth/authenticator.ts`, `jwt.ts`, `static-token.ts`, `credentials.ts` |
 | Sessions and limits | `sessions.ts`, `service.ts` |
 | Durable wiring | `agent/core-extension.ts`, `docs.ts`, `profiles.ts`, `models.ts` |
+| Sub-agents | `agent/subagents.ts` |
 | Tools | `tools/catalog.ts`, `activation.ts`, `mcp-extension.ts`, `mcp/manager.ts` |
 | Skills | `skills/skills.ts` |
 | Events and speech | `events/hub.ts`, `mapper.ts`, `speech.ts` |
-| Transport | `transport/http.ts`, `streamable-http.ts`, `sse.ts` |
+| Transport | `transport/http.ts`, `streamable-http.ts`, `sse.ts`, `mcp.ts` |
 | Test helpers (`agent-pi/testing`) | `testing.ts` |
 | The assistant app | `apps/assistant/config/`, `prompts/`, `skills/`, `content/`; its plugins are in `agent-pi/plugins` |
 

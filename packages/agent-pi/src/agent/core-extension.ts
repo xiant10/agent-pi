@@ -1,26 +1,20 @@
 import type { Context } from "@earendil-works/chord";
 import { Type } from "@earendil-works/pi-ai";
 import {
-	AgentDoc,
-	AssistantEntry,
-	configure,
 	defineExtension,
 	defineTool,
 	type Extension,
 	type PromptSection,
 	section,
 	type ToolExecutionApi,
-	type Submission,
 	type ToolRegistration,
 } from "@earendil-works/pi-durable";
-import type { CredentialStore } from "../auth/credentials.ts";
-import type { GrantBroker } from "../auth/grants.ts";
-import type { IdentityRegistry } from "../identity.ts";
 import { readSkillFile, renderSkillIndex, type Skill } from "../skills/skills.ts";
 import { activateSkill, activateTools } from "../tools/activation.ts";
 import type { ToolCatalog } from "../tools/catalog.ts";
 import { readSession } from "./docs.ts";
 import { EXPERT_TOOL, pinnedTools, type Profile } from "./profiles.ts";
+import { type ChildDeps, runChild, type Subagent, subagentTool } from "./subagents.ts";
 
 export const CORE_EXTENSION = "agent.core";
 export const INSTRUCTIONS_EXTENSION = "agent.instructions";
@@ -28,16 +22,14 @@ export const INSTRUCTIONS_EXTENSION = "agent.instructions";
 /** A named system prompt block, read from its own file at startup. */
 export type InstructionSection = { readonly name: string; readonly content: string; readonly tag?: boolean };
 
-export type CoreDeps = {
+export type CoreDeps = ChildDeps & {
 	readonly skills: readonly Skill[];
 	readonly profiles: ReadonlyMap<string, Profile>;
 	readonly defaultProfile: Profile;
 	/** A profile by name; the default for an unknown or absent name. */
 	readonly profileOf: (name: string | undefined) => Profile;
 	readonly catalog: ToolCatalog;
-	readonly credentials: CredentialStore;
-	readonly grants?: GrantBroker;
-	readonly identity: IdentityRegistry;
+	readonly subagents: readonly Subagent[];
 };
 
 const SEARCH_LIMIT = 8;
@@ -65,16 +57,18 @@ export function coreExtension(deps: CoreDeps): Extension {
 	sections.push(
 		section("profile", async (input, context) => {
 			const session = await readSession(input.read, input.conversationId, context);
-			return deps.profileOf(session?.profile).instructions;
+			// A child has its parent's profile for tool policy; the parent's voice is not the child's.
+			return session?.parent === undefined ? deps.profileOf(session?.profile).instructions : undefined;
 		}),
 	);
 
 	const tools: ToolRegistration[] = [loadSkillTool(deps), searchToolsTool(deps)];
 	if ([...deps.profiles.values()].some((profile) => profile.expert !== undefined)) tools.push(expertTool(deps));
+	for (const subagent of deps.subagents) tools.push(subagentTool(subagent, deps.catalog, deps));
 	return defineExtension({ name: CORE_EXTENSION, sections, tools });
 }
 
-/** The profile of the session a tool runs in; a child conversation without a session document gets the default. */
+/** The profile of the session a tool runs in. */
 async function profileFor(deps: CoreDeps, api: ToolExecutionApi, context: Context): Promise<Profile> {
 	return deps.profileOf((await readSession(api, api.conversationId, context))?.profile);
 }
@@ -171,44 +165,22 @@ function expertTool(deps: CoreDeps): ToolRegistration {
 			if (expert === undefined) {
 				return { isError: true, output: [{ type: "text", text: "No expert model is configured for this session." }] };
 			}
-			const child = await api.commit(async (tx) => {
-				const existing = (await tx.scanConversations({ ownerTaskId: api.taskId }, 1)).items[0];
-				if (existing !== undefined) return existing.id;
-				const created = await tx.createConversation({ ownership: { kind: "task", taskId: api.taskId } });
-				await configure(tx, created.id, {
+			return runChild(
+				deps,
+				api,
+				{
+					label: "expert",
+					requestId: `expert:${api.taskId}`,
 					model: expert.model,
 					thinkingLevel: expert.thinkingLevel,
 					instructions:
 						"You are consulted by another assistant that is talking with a user. Think the problem through, then " +
 						"answer with the conclusion first and only the reasoning the assistant needs to relay it.",
-				});
-				const agent = await tx.doc(AgentDoc, created.id);
-				if (Array.isArray(agent.tools)) agent.tools = agent.tools.filter((name) => name !== EXPERT_TOOL);
-				return created.id;
-			}, context);
-			deps.credentials.inherit(child, api.conversationId);
-			deps.identity.adopt(child, api.conversationId);
-			let settled: Awaited<ReturnType<Submission["wait"]>>;
-			try {
-				await deps.grants?.spawn(child, api.conversationId);
-				await api.details({ conversationId: child }, context);
-				const handle = await api.conversation(child, context);
-				if (handle === undefined) throw new Error("expert conversation vanished");
-				const submission = await handle.submit(
-					{ type: "input", content: args.question, requestId: `expert:${api.taskId}` },
-					context,
-				);
-				settled = await submission.wait(context);
-			} finally {
-				deps.credentials.delete(child);
-				deps.identity.release(child);
-				await deps.grants?.release(child);
-			}
-			if (settled.status !== "done" || settled.type !== "input") {
-				return { isError: true, output: [{ type: "text", text: `The expert could not answer (${settled.reason ?? settled.status}).` }] };
-			}
-			const answer = await api.commit((tx) => tx.entry(AssistantEntry, settled.answer), context);
-			return { output: [{ type: "text", text: assistantText(answer?.model?.[0]) || "(no answer)" }] };
+					tools: (inherited) => inherited.filter((name) => name !== EXPERT_TOOL),
+				},
+				args.question,
+				context,
+			);
 		},
 	});
 }
@@ -220,13 +192,4 @@ function policyOf(deps: CoreDeps, profile: Profile) {
 function firstSentence(text: string): string {
 	const match = /^(.{1,200}?[.!?。！？])(\s|$)/su.exec(text);
 	return (match?.[1] ?? text.slice(0, 200)).replace(/\s+/g, " ");
-}
-
-/** Text blocks of an assistant message, joined. */
-export function assistantText(message: { readonly role: string; readonly content?: unknown } | undefined): string {
-	if (message === undefined || message.role !== "assistant" || !Array.isArray(message.content)) return "";
-	return message.content
-		.filter((block): block is { type: "text"; text: string } => block?.type === "text" && typeof block.text === "string")
-		.map((block) => block.text)
-		.join("");
 }

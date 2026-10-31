@@ -84,6 +84,7 @@ export class SessionStore {
 		pinnedTools: readonly string[],
 		metadata: JsonObject | undefined,
 		context: Context,
+		transient = false,
 	): Promise<{ readonly conversation: Conversation; readonly sessionId: string }> {
 		const owner = ownerKey(principal);
 		const conversation = await this.#harness.createConversation(
@@ -91,11 +92,14 @@ export class SessionStore {
 				ownership: { kind: "ownerless" },
 				agent: { model: profile.model, thinkingLevel: profile.thinkingLevel },
 				init: async (tx, id) => {
-					const sessions = await tx.doc(UserSessionsDoc, owner, null);
-					if (sessions.sessions.length >= this.#maxPerUser) {
-						throw rateLimited(`at most ${this.#maxPerUser} open sessions per user; close one first`, 1);
+					// A transient session lives for one call. Its owner never lists it, and a crash leaves it out of their way.
+					if (!transient) {
+						const sessions = await tx.doc(UserSessionsDoc, owner, null);
+						if (sessions.sessions.length >= this.#maxPerUser) {
+							throw rateLimited(`at most ${this.#maxPerUser} open sessions per user; close one first`, 1);
+						}
+						sessions.sessions.push(id);
 					}
-					sessions.sessions.push(id);
 					const session = await tx.doc(SessionDoc, id);
 					session.owner = owner;
 					session.userId = principal.userId;
@@ -135,7 +139,29 @@ export class SessionStore {
 	): Promise<{ readonly conversation: Conversation; readonly session: Readonly<SessionState> }> {
 		const conversationId = this.parseId(sessionId);
 		const session = await this.#harness.snapshot(SessionDoc, conversationId, context);
+		if (session === undefined || session.owner !== ownerKey(principal) || session.closed === true || session.parent !== undefined) {
+			throw sessionNotFound();
+		}
+		const conversation = await this.#harness.conversation(conversationId, context);
+		if (conversation === undefined) throw sessionNotFound();
+		return { conversation, session };
+	}
+
+	/**
+	 * The caller's session or child conversation, for reading only. A child stays readable while its parent is open.
+	 */
+	async readable(
+		principal: Principal,
+		sessionId: string,
+		context: Context,
+	): Promise<{ readonly conversation: Conversation; readonly session: Readonly<SessionState> }> {
+		const conversationId = this.parseId(sessionId);
+		const session = await this.#harness.snapshot(SessionDoc, conversationId, context);
 		if (session === undefined || session.owner !== ownerKey(principal) || session.closed === true) throw sessionNotFound();
+		if (session.parent !== undefined) {
+			const parent = await this.#harness.snapshot(SessionDoc, session.parent as ConversationId, context);
+			if (parent === undefined || parent.closed === true) throw sessionNotFound();
+		}
 		const conversation = await this.#harness.conversation(conversationId, context);
 		if (conversation === undefined) throw sessionNotFound();
 		return { conversation, session };

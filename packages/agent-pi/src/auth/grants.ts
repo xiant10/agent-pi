@@ -139,8 +139,13 @@ export class GrantBroker {
 		return stored;
 	}
 
-	/** Give a spawned agent its own grant under the parent's. It holds no secret: its tokens come through this broker. */
-	async spawn(child: ConversationId, parent: ConversationId): Promise<void> {
+	/**
+	 * Give a spawned agent its own grant under the parent's, for storing, unless it has one, as on a rerun after a
+	 * restart. It holds no secret: its tokens come through this broker.
+	 */
+	async spawn(child: ConversationId, parent: ConversationId): Promise<StoredGrant> {
+		const known = await this.grantOf(child);
+		if (known !== undefined) return known;
 		const grant = await this.grantOf(parent);
 		if (grant === undefined) throw new GrantError("stopped", "the parent conversation has no agent grant");
 		const token = await this.#mint(grant.grantId);
@@ -152,7 +157,9 @@ export class GrantBroker {
 			actions: (claims.scope ?? "").split(" ").filter((action) => action.length > 0),
 			audiences: typeof claims.aud === "string" ? [claims.aud] : (claims.aud ?? []),
 		});
-		this.#byConversation.set(child, { grantId: created });
+		const spawned = { grantId: created };
+		this.#byConversation.set(child, spawned);
+		return spawned;
 	}
 
 	/** End a spawned agent's grant. Best effort: it would expire with its parent anyway. */

@@ -15,7 +15,7 @@ import {
 	UsageDoc,
 	type UserInput,
 } from "@earendil-works/pi-durable";
-import { assistantText } from "./agent/core-extension.ts";
+import { assistantText } from "./agent/subagents.ts";
 import { SessionDoc, type SessionState, ToolStateDoc } from "./agent/docs.ts";
 import { pinnedTools, preloadTools, type Profile } from "./agent/profiles.ts";
 import { parkedTasks } from "./agent/parked.ts";
@@ -25,6 +25,7 @@ import { type GrantBroker, GrantError, type StoredGrant } from "./auth/grants.ts
 import type { LimitsConfig } from "./config.ts";
 import { AppError, invalidParams, RPC, rateLimited } from "./errors.ts";
 import type { HubRegistry, SessionHub } from "./events/hub.ts";
+import type { ClientEventBody } from "./events/mapper.ts";
 import { currentTurnRecord, recordTurn } from "./identity.ts";
 import { toolSpans } from "./events/tool-spans.ts";
 import { appendReply, type ReplyRecord, ReplyRequestsDoc } from "./plugins/history.ts";
@@ -67,6 +68,16 @@ export type PromptOptions = {
 	readonly duringTools?: "abort" | "steer";
 };
 
+export type TaskOptions = Pick<PromptOptions, "turnId" | "traceparent"> & {
+	readonly profile?: string;
+	readonly metadata?: JsonObject;
+	/** Sees the task's session events. */
+	readonly onEvent?: (event: ClientEventBody) => void;
+	readonly signal: AbortSignal;
+};
+
+export type TaskOutcome = { readonly status: string; readonly reason?: string; readonly text?: string };
+
 export type Admitted =
 	| {
 			readonly kind: "run";
@@ -95,6 +106,10 @@ export type SessionDetails = SessionInfo & {
 	readonly parked: number;
 	readonly activeTools: readonly string[];
 	readonly usage: JsonObject;
+	/** The session a child conversation works for. */
+	readonly parent?: string;
+	/** This session's newest child conversations, which `session.get` and the event stream can read. */
+	readonly subagents: readonly string[];
 };
 
 /**
@@ -115,7 +130,7 @@ export class AgentService {
 
 	async createSession(
 		principal: Principal,
-		options: { readonly profile?: string; readonly metadata?: JsonObject },
+		options: { readonly profile?: string; readonly metadata?: JsonObject; readonly transient?: boolean },
 		context: Context,
 	): Promise<SessionInfo> {
 		const profile = this.#profile(options.profile);
@@ -125,6 +140,7 @@ export class AgentService {
 			pinnedTools(profile, this.#deps.catalog),
 			options.metadata,
 			context,
+			options.transient,
 		);
 		this.#deps.credentials.set(conversation.id, principal);
 		this.#deps.log.info("session.created", { sessionId, owner: ownerKey(principal), profile: profile.name });
@@ -139,7 +155,8 @@ export class AgentService {
 	}
 
 	async getSession(principal: Principal, sessionId: string, context: Context): Promise<SessionDetails> {
-		const { conversation, session } = await this.#deps.store.require(principal, sessionId, context);
+		const { store } = this.#deps;
+		const { conversation, session } = await store.readable(principal, sessionId, context);
 		const [agent, live, usage] = await Promise.all([
 			this.#deps.harness.snapshot(AgentDoc, conversation.id, context),
 			this.#deps.harness.snapshot(LiveDoc, conversation.id, context),
@@ -151,6 +168,8 @@ export class AgentService {
 			parked: (await parkedTasks(this.#deps.harness, conversation.id, context)).length,
 			activeTools: Array.isArray(agent?.tools) ? [...agent.tools] : [],
 			usage: (usage ?? {}) as JsonObject,
+			...(session.parent === undefined ? {} : { parent: store.publicId(session.parent as ConversationId) }),
+			subagents: (session.subagents ?? []).map((id) => store.publicId(id as ConversationId)),
 		};
 	}
 
@@ -170,6 +189,50 @@ export class AgentService {
 			throw new AppError("auth_unavailable", 503, RPC.internal, error instanceof Error ? error.message : String(error));
 		}
 		if (grant.grantId !== stored?.grantId) await this.#deps.store.setGrant(conversationId, grant, context);
+	}
+
+	/**
+	 * One task in a session of its own, for callers that have no session to come back to: the answer, then the session
+	 * closes. Aborting `signal` stops the run, since nobody could read its answer.
+	 */
+	async runTask(principal: Principal, input: unknown, options: TaskOptions, context: Context): Promise<TaskOutcome> {
+		const { sessionId } = await this.createSession(
+			principal,
+			{ ...(options.profile === undefined ? {} : { profile: options.profile }), ...(options.metadata === undefined ? {} : { metadata: options.metadata }), transient: true },
+			context,
+		);
+		const stop = () => void this.cancel(principal, sessionId, context).catch(() => undefined);
+		const { onEvent, signal } = options;
+		let unsubscribe: (() => void) | undefined;
+		try {
+			if (onEvent !== undefined) {
+				const subscription = (await this.hub(principal, sessionId, context)).subscribe({ event: (event) => onEvent(event.body), end: () => undefined });
+				unsubscribe = () => subscription.unsubscribe();
+			}
+			const admitted = await this.prompt(
+				principal,
+				sessionId,
+				input,
+				{ ...(options.turnId === undefined ? {} : { turnId: options.turnId }), ...(options.traceparent === undefined ? {} : { traceparent: options.traceparent }) },
+				context,
+			);
+			if (admitted.kind === "reply") return { status: "done", text: admitted.text };
+			signal.addEventListener("abort", stop, { once: true });
+			if (signal.aborted) stop();
+			const settled = await admitted.submission.wait(context);
+			const text = await this.answerText(admitted.conversationId, settled);
+			return {
+				status: settled.status,
+				...(settled.reason === undefined ? {} : { reason: settled.reason }),
+				...(text === undefined ? {} : { text }),
+			};
+		} finally {
+			signal.removeEventListener("abort", stop);
+			unsubscribe?.();
+			await this.close(principal, sessionId, context).catch((error: unknown) =>
+				this.#deps.log.warn("task.close_failed", { sessionId, error: String(error) }),
+			);
+		}
 	}
 
 	/** Admit user input. An idle session starts a run; a busy one queues it as `whenBusy` says. */
@@ -383,15 +446,17 @@ export class AgentService {
 
 	/** The session's event hub, after the ownership check. */
 	async hub(principal: Principal, sessionId: string, context: Context): Promise<SessionHub> {
-		const { conversation, session } = await this.#deps.store.require(principal, sessionId, context);
-		this.#deps.credentials.set(conversation.id, principal);
+		const { conversation, session } = await this.#deps.store.readable(principal, sessionId, context);
+		const child = session.parent !== undefined;
+		if (!child) this.#deps.credentials.set(conversation.id, principal);
 		const profile = this.#profile(session.profile);
 		const transform = this.#deps.plugins.eventMapper({ sessionId, profile });
+		const owner = (session.parent as ConversationId | undefined) ?? conversation.id;
 		return this.#deps.hubs.get(conversation.id, {
-			speech: profile.speech,
+			speech: profile.speech && !child,
 			thinking: profile.thinkingEvents,
 			...(transform === undefined ? {} : { transform }),
-			observe: toolSpans(async () => (await currentTurnRecord(this.#deps.harness, conversation.id, BACKGROUND_CONTEXT))?.traceparent),
+			observe: toolSpans(async () => (await currentTurnRecord(this.#deps.harness, owner, BACKGROUND_CONTEXT))?.traceparent),
 		});
 	}
 

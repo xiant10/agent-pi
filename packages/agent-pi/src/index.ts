@@ -1,7 +1,7 @@
 // Running
 export { type RunningAgent, type StartOptions, startAgent } from "./app.ts";
 export { type RunOptions, runAgent } from "./run.ts";
-export { type AppConfig, loadConfig, loadDotEnv, type PluginRef, type ProfileConfig } from "./config.ts";
+export { type AppConfig, loadConfig, loadDotEnv, type PluginRef, type ProfileConfig, type SubagentConfig, type ExposedToolConfig, type McpEndpointConfig } from "./config.ts";
 
 // Plugins and IoC
 export {

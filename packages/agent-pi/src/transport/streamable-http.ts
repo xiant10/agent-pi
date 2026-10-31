@@ -33,8 +33,8 @@ export const CORE_METHODS = [
 	"skills.list",
 ] as const;
 
-type RpcId = string | number | null;
-type RpcRequest = { readonly id?: RpcId; readonly method: string; readonly params: Record<string, unknown> };
+export type RpcId = string | number | null;
+export type RpcRequest = { readonly id?: RpcId; readonly method: string; readonly params: Record<string, unknown> };
 
 export type StreamableOptions = {
 	readonly service: AgentService;
@@ -420,7 +420,7 @@ function objectParam(value: unknown, name: string): JsonObject {
 	return value as JsonObject;
 }
 
-function parseRequest(body: string): RpcRequest {
+export function parseRequest(body: string): RpcRequest {
 	let value: unknown;
 	try {
 		value = JSON.parse(body);
@@ -471,7 +471,7 @@ export function readBody(req: IncomingMessage, maxBytes: number): Promise<string
 	});
 }
 
-function rpcError(id: RpcId, error: AppError): unknown {
+export function rpcError(id: RpcId, error: AppError): unknown {
 	return { jsonrpc: "2.0", id, error: { code: error.rpcCode, message: error.message, data: { code: error.code } } };
 }
 

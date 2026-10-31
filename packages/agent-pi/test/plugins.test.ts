@@ -246,7 +246,7 @@ describe("run limits", () => {
 		});
 		running = await startTestAgent({
 			plugins: [slow],
-			config: { limits: { maxSessionsPerUser: 5, maxConcurrentRunsPerUser: 1, maxConcurrentRuns: 50, maxInputChars: 10_000, maxBodyBytes: 1_000_000 } },
+			config: { limits: { maxSessionsPerUser: 5, maxConcurrentRunsPerUser: 1, maxConcurrentRuns: 50, maxInputChars: 10_000, maxBodyBytes: 1_000_000, maxSubagentsPerSession: 3 } },
 		});
 		running.faux.setResponses([fauxAssistantMessage([fauxText("one")]), fauxAssistantMessage([fauxText("two")])]);
 		const a = await createSession(running);
