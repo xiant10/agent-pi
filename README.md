@@ -117,7 +117,7 @@ One endpoint, `/agent`. Every request needs `Authorization: Bearer <jwt>`.
 
 | HTTP | Purpose |
 |---|---|
-| `POST /agent` | One JSON-RPC 2.0 request. `session.prompt`/`session.interrupt` stream SSE when `Accept` includes `text/event-stream`. |
+| `POST /agent` | One JSON-RPC 2.0 request. `session.prompt`/`session.interrupt` stream SSE when `Accept` includes `text/event-stream`; the `Agent-Submission-Id` response header names the stream's submission (absent when a plugin answered). |
 | `GET /agent` | The session's event stream (`Accept: text/event-stream`). Send `Last-Event-ID` to resume. |
 | `DELETE /agent` | Close the session in `Agent-Session-Id`. |
 | `GET /healthz`, `/readyz` | Probes, no auth. |
@@ -131,7 +131,7 @@ The session is named by the `Agent-Session-Id` header or `params.sessionId`.
 | `session.get` | | `{ sessionId, profile, busy, activeTools, usage }` |
 | `session.prompt` | `input`, `requestId?`, `turnId?`, `whenBusy?` (`followUp`, `steer`, `reject`), `wait?`, `abortOnDisconnect?` | `{ turnId, submissionId, status, reason?, detail?, text? }`, or `{ turnId, status: "done", answeredBy, text, placement }` when a plugin answered (`placement: "queued"` when the session was busy) |
 | `session.steer` | `input`, `requestId?`, `turnId?` | `{ turnId, submissionId, placement }` |
-| `session.interrupt` | `input?`, `requestId?`, `turnId?` | like `session.prompt`, or `{ aborted: true }` |
+| `session.interrupt` | `input?`, `requestId?`, `turnId?`, `duringTools?` (`abort`, `steer`) | like `session.prompt`, or `{ aborted: true }` |
 | `session.cancel` | | `{ aborted: true }` |
 | `session.close` | | `{ closed: true }` |
 | `skills.list` | | `{ skills }` |
@@ -139,9 +139,13 @@ The session is named by the `Agent-Session-Id` header or `params.sessionId`.
 
 `input` is a string or pi-ai content blocks (`{type:"text",text}`, `{type:"image",data,mimeType}`). `requestId` makes a retried prompt idempotent.
 
+`duringTools: "steer"` on `session.interrupt` lets running tools finish and joins the run instead of aborting them. An aborted tool is reported to the model as aborted even if it had already acted, so a client whose tools change things should send it: the model then knows what actually happened. Text being generated is aborted either way.
+
 A **turn** is one user message and every model call it triggers (tool loops, retries). Send `turnId` (param, or the `X-Turn-ID` header; 1-128 of `A-Za-z0-9._:-`) to name it; otherwise agent-pi generates one when the call arrives and returns it as `turnId`. A retried `requestId` keeps its first turn. Plugins see it as `turn.turnId`, `run.turnId`, and `ctx.turnId`.
 
 **Audit identity to the model gateway.** A model with `identityHeaders` sends who the call is for on every request: `"gateway"` means `X-Session-ID` (the public session id), `X-Turn-ID`, `X-User-Id`, and `X-User-Name` (the JWT `nameClaim`, default `name`; percent-encoded when not ASCII), as the agent gateway's audit log expects. Or name your own headers: `{ "sessionId": "X-Session", "turnId": "X-Turn", "userId": "X-User", "userName": "X-Name", "tenantId": "X-Tenant" }`. Only `openai-compatible` models support it.
+
+**Tracing.** Send a W3C `traceparent` header with a prompt and its work joins your trace: an `agent.submission` span, with an `agent.model` span per model request and an `agent.tool` span per tool call under it. Without one, the input starts a trace of its own. Set `OTEL_EXPORTER_OTLP_ENDPOINT` (a URL such as `http://collector:4318`; `OTEL_SERVICE_NAME` defaults to `agent-pi`) to export them over OTLP/HTTP. A model with `identityHeaders` also passes its `agent.model` span to the gateway as `traceparent`. `agent.model` spans cover `openai-compatible` models only.
 
 For downstream systems that need more than a field-to-name map (a header from a claim or from session metadata, a different value format, dropping one), bind a resolver in a plugin's `register()`. It runs on every model request and is merged over the model's `identityHeaders`: a string sets or replaces a header, `null` removes it.
 

@@ -102,7 +102,7 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 	const registry = createRegistry();
 	registry.install(instructionsExtension(config.instructions));
 	for (const extension of plugins.extensions(profileOf, credentials)) registry.install(extension);
-	registry.install(coreExtension({ skills, profiles, defaultProfile, profileOf, catalog, credentials }));
+	registry.install(coreExtension({ skills, profiles, defaultProfile, profileOf, catalog, credentials, identity }));
 	registry.install(identityExtension(identity, (id) => store.publicId(id), credentials));
 	// A server's tools enter the registry as one extension, replaced in place when the server re-lists its tools.
 	// Plugins' in-process tools are catalogued too, so skills and search find them, but their extension holds the code.

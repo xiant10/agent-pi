@@ -247,7 +247,7 @@ values, because the task can replay. `sessionId` and `userId` are `undefined` in
 
 - **followUp** (default): queued, answered after the current run.
 - **steer**: joins the running work after its current tool round. Runs `beforePrompt` like any input.
-- **interrupt**: `conversation.abort()` first (the partial answer stays in the transcript), then a normal prompt.
+- **interrupt**: `conversation.abort()` first (the partial answer stays in storage, but the model no longer sees it), then a normal prompt. With `duringTools: "steer"`, running tools finish and the input joins the run as a steer.
 
 A plugin `reply` while the session is busy is queued and enters the transcript at the next boundary.
 
@@ -389,4 +389,10 @@ Which hooks each bundled plugin implements:
 - **Credentials are time-limited.** `principal` can be absent in resumed runs, and after 30 minutes without a request
   on an idle session. Hooks that need the caller must handle `undefined`.
 - **Identity reaches the gateway.** Each model call carries session, turn and user ids as headers; a plugin can
-  customize them by binding `Services.identityHeaders` in `register()`.
+  customize them by binding `Services.identityHeaders` in `register()`. A child conversation such as `consult_expert`
+  calls for its parent's session and turn.
+- **Spans must not come from durable hooks.** Hooks can replay, which would report work twice. `agent.submission` is
+  opened at admission, unless the input is a retry; `agent.model` wraps the provider call itself (`withModelSpans`), so
+  a request sent twice shows twice; `agent.tool` comes from the event stream (`toolSpans`), upstream of `mapEvent`.
+  Where a turn's work goes in its trace is stored with the turn, so a resumed run stays in that trace, though a span
+  open when the process died is lost.

@@ -1,6 +1,7 @@
 import { fileURLToPath } from "node:url";
 import { type RunningAgent, type StartOptions, startAgent } from "./app.ts";
 import { type AppConfig, loadConfig, loadDotEnv } from "./config.ts";
+import { setupTracing } from "./util/tracing.ts";
 
 export type RunOptions = StartOptions & {
 	/**
@@ -34,6 +35,7 @@ export async function runAgent(options: RunOptions): Promise<RunningAgent> {
 		process.exit(1);
 	});
 
+	const stopTracing = setupTracing();
 	const agent = await startAgent(resolved, start);
 	let stopping = false;
 	const stop = (signal: string) => {
@@ -41,7 +43,7 @@ export async function runAgent(options: RunOptions): Promise<RunningAgent> {
 		stopping = true;
 		log("info", "agent.signal", { signal });
 		agent.close().then(
-			() => process.exit(0),
+			() => (stopTracing?.() ?? Promise.resolve()).finally(() => process.exit(0)),
 			(error: unknown) => {
 				console.error(error);
 				process.exit(1);

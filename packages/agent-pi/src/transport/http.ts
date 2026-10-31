@@ -3,7 +3,8 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { type Authenticator, AuthError, type Principal } from "../auth/authenticator.ts";
 import type { AgentService } from "../service.ts";
 import type { Logger } from "../util/log.ts";
-import { handleStreamable, SESSION_HEADER, toAppError, TURN_HEADER, writeJson } from "./streamable-http.ts";
+import { traceIdOf } from "../util/tracing.ts";
+import { handleStreamable, SESSION_HEADER, SUBMISSION_HEADER, toAppError, TRACE_HEADER, TURN_HEADER, writeJson } from "./streamable-http.ts";
 
 export type HttpOptions = {
 	readonly authenticator: Authenticator;
@@ -28,6 +29,7 @@ export function createHttpServer(options: HttpOptions): Server {
 		const started = Date.now();
 		const requestId = typeof req.headers["x-request-id"] === "string" ? req.headers["x-request-id"] : randomUUID();
 		res.setHeader("x-request-id", requestId);
+		const traceId = typeof req.headers[TRACE_HEADER] === "string" ? traceIdOf(req.headers[TRACE_HEADER]) : undefined;
 		let principal: Principal | undefined;
 		res.on("finish", () => {
 			options.log.info("http.request", {
@@ -36,6 +38,7 @@ export function createHttpServer(options: HttpOptions): Server {
 				path: req.url?.split("?")[0],
 				status: res.statusCode,
 				ms: Date.now() - started,
+				...(traceId === undefined ? {} : { traceId }),
 				...(principal === undefined ? {} : { userId: principal.userId, tenantId: principal.tenantId }),
 			});
 		});
@@ -85,7 +88,7 @@ async function route(
 	if (req.method === "OPTIONS") {
 		res.writeHead(204, {
 			"access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
-			"access-control-allow-headers": `authorization, content-type, accept, last-event-id, ${SESSION_HEADER}, ${TURN_HEADER}`,
+			"access-control-allow-headers": `authorization, content-type, accept, last-event-id, ${SESSION_HEADER}, ${TURN_HEADER}, ${TRACE_HEADER}`,
 			"access-control-max-age": "600",
 		});
 		res.end();
@@ -117,6 +120,6 @@ function applyCors(req: IncomingMessage, res: ServerResponse, allowed: readonly 
 	if (!allowed.includes("*") && !allowed.includes(origin)) return false;
 	res.setHeader("access-control-allow-origin", origin);
 	res.setHeader("vary", "origin");
-	res.setHeader("access-control-expose-headers", `${SESSION_HEADER}, x-request-id, agent-instance, retry-after`);
+	res.setHeader("access-control-expose-headers", `${SESSION_HEADER}, ${SUBMISSION_HEADER}, x-request-id, agent-instance, retry-after`);
 	return true;
 }

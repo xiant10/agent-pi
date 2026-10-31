@@ -248,6 +248,53 @@ describe("steering and interrupts", () => {
 		expect(firstResult).toMatchObject({ status: "unanswered", reason: "aborted" });
 	});
 
+	it("with duringTools: steer, an interrupt lets running tools finish and joins the run", async () => {
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const mcp = fakeMcpServer([{ name: "send", description: "Send.", call: async () => (await gate, "sent") }]);
+		running = await startTestAgent({ mcp, config: { profiles: { chat: { model: "main", thinkingLevel: "off", alwaysOnTools: ["crm:send"], maxActiveTools: 12, preload: { maxTools: 0, minScore: 4 }, speech: false, thinkingEvents: false } } } });
+		const results: string[] = [];
+		running.faux.setResponses([
+			fauxAssistantMessage([fauxToolCall("crm_send", {})], { stopReason: "toolUse" }),
+			(context) => {
+				for (const message of context.messages) if (message.role === "toolResult") results.push(JSON.stringify(message.content));
+				return fauxAssistantMessage([fauxText("It was sent.")]);
+			},
+		]);
+		const sessionId = await createSession(running);
+		const prompt = rpc(running.url, TOKENS.alice, "session.prompt", { sessionId, input: "Send it" });
+		await waitFor(() => mcp.calls.length === 1);
+		const interrupt = rpc(running.url, TOKENS.alice, "session.interrupt", { sessionId, input: "Never mind", duringTools: "steer" });
+		await waitFor(async () => (await rpc(running!.url, TOKENS.alice, "session.get", { sessionId })).body.result!.busy === true);
+		release();
+		expect((await interrupt).body.result).toMatchObject({ status: "done", text: "It was sent." });
+		expect((await prompt).body.result).toMatchObject({ status: "done" });
+		expect(results[0]).toContain("sent");
+	});
+
+	it("with duringTools: steer, an interrupt still aborts text being generated", async () => {
+		running = await startTestAgent({ tokensPerSecond: 20 });
+		running.faux.setResponses([
+			fauxAssistantMessage([fauxText("This is a very long answer that keeps going and going for quite a while longer.")]),
+			fauxAssistantMessage([fauxText("Top three only.")]),
+		]);
+		const sessionId = await createSession(running);
+		const first = rpcStream(running.url, TOKENS.alice, "session.prompt", { sessionId, input: "Summarize everything" });
+		await waitFor(async () => (await rpc(running!.url, TOKENS.alice, "session.get", { sessionId })).body.result!.busy === true);
+		const interrupted = await rpc(running.url, TOKENS.alice, "session.interrupt", { sessionId, input: "Top three", duringTools: "steer" });
+		expect(interrupted.body.result).toMatchObject({ status: "done", text: "Top three only." });
+		expect((await first).messages.at(-1)!.data.result).toMatchObject({ status: "unanswered", reason: "aborted" });
+	});
+
+	it("refuses an unknown duringTools", async () => {
+		running = await startTestAgent();
+		const sessionId = await createSession(running);
+		const response = await rpc(running.url, TOKENS.alice, "session.interrupt", { sessionId, input: "x", duringTools: "wait" });
+		expect(response.status).toBe(400);
+	});
+
 	it("a retried interrupt does not abort the run its first attempt started", async () => {
 		running = await startTestAgent({ tokensPerSecond: 20 });
 		running.faux.setResponses([
@@ -272,6 +319,14 @@ describe("steering and interrupts", () => {
 });
 
 describe("event stream", () => {
+	it("names the submission of a streamed run before its first event", async () => {
+		running = await startTestAgent();
+		running.faux.setResponses([fauxAssistantMessage([fauxText("one")])]);
+		const sessionId = await createSession(running);
+		const { headers, messages } = await rpcStream(running.url, TOKENS.alice, "session.prompt", { sessionId, input: "1" });
+		expect(headers.get("agent-submission-id")).toBe(String(messages.at(-1)!.data.result!.submissionId));
+	});
+
 	it("resumes with Last-Event-ID from the buffer", async () => {
 		running = await startTestAgent();
 		running.faux.setResponses([fauxAssistantMessage([fauxText("one")]), fauxAssistantMessage([fauxText("two")])]);

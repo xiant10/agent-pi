@@ -14,6 +14,7 @@ import {
 	type ToolRegistration,
 } from "@earendil-works/pi-durable";
 import type { CredentialStore } from "../auth/credentials.ts";
+import type { IdentityRegistry } from "../identity.ts";
 import { readSkillFile, renderSkillIndex, type Skill } from "../skills/skills.ts";
 import { activateSkill, activateTools } from "../tools/activation.ts";
 import type { ToolCatalog } from "../tools/catalog.ts";
@@ -34,6 +35,7 @@ export type CoreDeps = {
 	readonly profileOf: (name: string | undefined) => Profile;
 	readonly catalog: ToolCatalog;
 	readonly credentials: CredentialStore;
+	readonly identity: IdentityRegistry;
 };
 
 const SEARCH_LIMIT = 8;
@@ -183,6 +185,7 @@ function expertTool(deps: CoreDeps): ToolRegistration {
 				return created.id;
 			}, context);
 			deps.credentials.inherit(child, api.conversationId);
+			deps.identity.adopt(child, api.conversationId);
 			let settled: Awaited<ReturnType<Submission["wait"]>>;
 			try {
 				await api.details({ conversationId: child }, context);
@@ -195,6 +198,7 @@ function expertTool(deps: CoreDeps): ToolRegistration {
 				settled = await submission.wait(context);
 			} finally {
 				deps.credentials.delete(child);
+				deps.identity.release(child);
 			}
 			if (settled.status !== "done" || settled.type !== "input") {
 				return { isError: true, content: [{ type: "text", text: `The expert could not answer (${settled.reason ?? settled.status}).` }] };

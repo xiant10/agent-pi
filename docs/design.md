@@ -154,7 +154,9 @@ methods. MCP clients already implement this pattern, and it works through ordina
 
 - `POST /agent` with one JSON-RPC request. `Agent-Session-Id` header (or `params.sessionId`) selects the session.
   - `Accept: text/event-stream` on `session.prompt` / `session.interrupt`: the response is an SSE stream of
-    `session/event` notifications for that run, ending with the JSON-RPC response, then closed.
+    `session/event` notifications for that run, ending with the JSON-RPC response, then closed. Every stream receives
+    every session event; the `Agent-Submission-Id` response header names the stream's own submission, so a client can
+    tell its input's `submission` events from another's. A plugin's answer has no submission, and no header.
   - Otherwise the response is `application/json` with the JSON-RPC result.
 - `GET /agent` with `Agent-Session-Id` and `Accept: text/event-stream`: the session's event stream, independent of
   any request. `Last-Event-ID` resumes from an in-memory ring buffer; if the id is too old, or the process
@@ -214,8 +216,12 @@ The user hears the whole unwanted answer. So there are two operations:
 - `session.steer`: durable steer. Use it to add constraints while the agent works through tools ("use the EU
   account"). It joins the current run after the current tool round.
 - `session.interrupt`: `conversation.abort()` (stops generation and tool calls, withdraws queued inputs), then
-  submits the new input as a fresh prompt. Use it for barge-in. The aborted partial answer stays in the transcript as
-  an aborted assistant entry, so the model knows what it had already said.
+  submits the new input as a fresh prompt. Use it for barge-in. The aborted partial answer stays in storage as an
+  aborted assistant entry, but durable leaves aborted entries out of model context, so the model does not know what it
+  had already said. A client that needs it to, such as a voice client that knows what was heard, says so in `input`.
+  An aborted tool is reported to the model as aborted, even if it had already acted, and models then tell the user it
+  did not happen (measured: "cancelled" for an email already sent). `duringTools: "steer"` avoids this: tools that are
+  running finish, the input joins the run, and only text generation is aborted.
 
 ## R3 + R8: skills and dynamic tool loading
 

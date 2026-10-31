@@ -5,7 +5,7 @@ import { createModels, createProvider, type Models, type MutableModels, type Pro
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import type { ModelRef } from "@earendil-works/pi-durable";
-import { type IdentityHeaderNames, type IdentityHeaderResolver, IdentityRegistry, withIdentityHeaders } from "../identity.ts";
+import { type IdentityHeaderNames, type IdentityHeaderResolver, IdentityRegistry, withIdentityHeaders, withModelSpans } from "../identity.ts";
 
 export type ModelConfig =
 	| { readonly provider: "anthropic" | "openai"; readonly modelId: string }
@@ -83,7 +83,8 @@ function compatibleProvider(providerId: string, group: readonly CompatibleConfig
 			throw new Error(`models of provider "${providerId}" must share identityHeaders; set providerId to separate them`);
 		}
 	}
-	const withIdentity = (streams: ProviderStreams) => (headerNames === undefined ? streams : withIdentityHeaders(streams, identity, headerNames, resolver));
+	const withIdentity = (streams: ProviderStreams) =>
+		withModelSpans(headerNames === undefined ? streams : withIdentityHeaders(streams, identity, headerNames, resolver), identity, headerNames !== undefined);
 	const wire = api === "responses" ? "openai-responses" : "openai-completions";
 	return createProvider({
 		id: providerId,

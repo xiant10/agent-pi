@@ -193,13 +193,13 @@ export async function rpcStream(
 	token: string,
 	method: string,
 	params: Record<string, unknown>,
-): Promise<{ status: number; messages: SseMessage[] }> {
+): Promise<{ status: number; headers: Headers; messages: SseMessage[] }> {
 	const response = await fetch(url, {
 		method: "POST",
 		headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: `Bearer ${token}` },
 		body: JSON.stringify({ jsonrpc: "2.0", id: nextId++, method, params }),
 	});
-	return { status: response.status, messages: parseSse(await response.text()) };
+	return { status: response.status, headers: response.headers, messages: parseSse(await response.text()) };
 }
 
 /** Event bodies of the `session/event` notifications among `messages`. */

@@ -23,7 +23,8 @@ import type { CredentialStore } from "./auth/credentials.ts";
 import type { LimitsConfig } from "./config.ts";
 import { AppError, invalidParams, RPC, rateLimited } from "./errors.ts";
 import type { HubRegistry, SessionHub } from "./events/hub.ts";
-import { recordTurn } from "./identity.ts";
+import { currentTurnRecord, recordTurn } from "./identity.ts";
+import { toolSpans } from "./events/tool-spans.ts";
 import { appendReply, type ReplyRecord, ReplyRequestsDoc } from "./plugins/history.ts";
 import { type PluginRunner, textOf } from "./plugins/runner.ts";
 import type { AgentPlugin, SessionContext } from "./plugins/types.ts";
@@ -32,6 +33,7 @@ import type { Skill } from "./skills/skills.ts";
 import { activateTools, refreshSkills } from "./tools/activation.ts";
 import type { ToolCatalog } from "./tools/catalog.ts";
 import type { Logger } from "./util/log.ts";
+import { startSpan, traceIdOf, type TraceSpan } from "./util/tracing.ts";
 
 export type ServiceDeps = {
 	readonly harness: Harness;
@@ -51,8 +53,15 @@ export type PromptOptions = {
 	readonly requestId?: string;
 	/** The client's id for this turn (one user message and the model calls it triggers); generated when absent. */
 	readonly turnId?: string;
+	/** The W3C trace context of the client's turn; this input's work is added to that trace. */
+	readonly traceparent?: string;
 	/** What to do when the session is already working. Default `followUp`: answer after the current run. */
 	readonly whenBusy?: "followUp" | "steer" | "reject";
+	/**
+	 * For `interrupt`, what to do when tools are running. Default `abort`. `steer` lets them finish and joins the run: a
+	 * tool may already have acted, and an aborted one is reported to the model as if it had not.
+	 */
+	readonly duringTools?: "abort" | "steer";
 };
 
 export type Admitted =
@@ -197,6 +206,7 @@ export class AgentService {
 			this.#deps.log.debug("prompt.plugin_reply", { sessionId, plugin: reply.plugin, placement: reply.placement });
 			if (!reply.duplicate) {
 				this.#deps.plugins.afterRun(conversation.id, session, { turnId: reply.turnId, status: "done", text: reply.text, answeredBy: reply.plugin });
+				startSpan("agent.reply", { traceparent: options.traceparent, attributes: { "agentpi.session_id": sessionId, "turn.id": turnId, "agent.answered_by": reply.plugin } }).end();
 			}
 			return { kind: "reply", conversationId: conversation.id, profile, turnId: reply.turnId, text: reply.text, plugin: reply.plugin, placement: reply.placement };
 		}
@@ -222,28 +232,51 @@ export class AgentService {
 			if (preloaded.length > 0) this.#deps.log.debug("tools.preloaded", { sessionId, added: preloaded });
 		}
 
-		// With a known `requestId`, durable returns the existing submission and ignores the content.
-		const submission = await conversation.submit(
-			{
-				type: "input",
-				content: submitted,
-				whenBusy: options.whenBusy ?? "followUp",
+		// A retry's span is its first attempt's. Model and tool spans go under this one, wherever the run's work lands.
+		const span = earlier === undefined
+			? startSpan("agent.submission", { traceparent: options.traceparent, attributes: { "agentpi.session_id": sessionId, "turn.id": turnId } })
+			: undefined;
+		try {
+			// With a known `requestId`, durable returns the existing submission and ignores the content.
+			const submission = await conversation.submit(
+				{
+					type: "input",
+					content: submitted,
+					whenBusy: options.whenBusy ?? "followUp",
+					...(requestId === undefined ? {} : { requestId }),
+				},
+				context,
+			);
+			// A retry keeps the turn its first attempt recorded.
+			const turn = await recordTurn(conversation, submission.id, turnId, span?.traceparent ?? options.traceparent, context);
+			if (earlier === undefined) this.#afterRun(conversation.id, session, submission, turn);
+			const record = await submission.status(context);
+			const placement = record.status === "queued" ? "queued" : "placed";
+			this.#deps.log.info("prompt.admitted", {
+				sessionId,
+				turnId: turn,
+				submissionId: submission.id,
+				placement,
 				...(requestId === undefined ? {} : { requestId }),
+				...(options.traceparent === undefined ? {} : { traceId: traceIdOf(options.traceparent) }),
+			});
+			if (span !== undefined) this.#settleSpan(span, submission, placement);
+			return { kind: "run", submission, conversationId: conversation.id, profile, turnId: turn, placement };
+		} catch (error) {
+			span?.end(String(error));
+			throw error;
+		}
+	}
+
+	#settleSpan(span: TraceSpan, submission: Submission, placement: string): void {
+		span.setAttributes({ "agent.submission_id": submission.id, "agent.placement": placement });
+		void submission.wait(BACKGROUND_CONTEXT).then(
+			(settled) => {
+				span.setAttributes({ "agent.status": settled.status, ...(settled.reason === undefined ? {} : { "agent.reason": settled.reason }) });
+				span.end();
 			},
-			context,
+			(error: unknown) => span.end(String(error)),
 		);
-		// A retry keeps the turn its first attempt recorded.
-		const turn = await recordTurn(conversation, submission.id, turnId, context);
-		if (earlier === undefined) this.#afterRun(conversation.id, session, submission, turn);
-		const record = await submission.status(context);
-		return {
-			kind: "run",
-			submission,
-			conversationId: conversation.id,
-			profile,
-			turnId: turn,
-			placement: record.status === "queued" ? "queued" : "placed",
-		};
 	}
 
 	/** What an earlier input with this `requestId` became: a plugin reply, a model run, or nothing yet. */
@@ -260,29 +293,41 @@ export class AgentService {
 	}
 
 	/** Join the running work after its current tool round; starts a run when idle. */
-	steer(principal: Principal, sessionId: string, input: unknown, ids: Pick<PromptOptions, "requestId" | "turnId">, context: Context) {
+	steer(principal: Principal, sessionId: string, input: unknown, ids: Pick<PromptOptions, "requestId" | "turnId" | "traceparent">, context: Context) {
 		return this.prompt(principal, sessionId, input, { ...ids, whenBusy: "steer" }, context);
 	}
 
 	/**
 	 * Barge-in: stop generation and tool calls now, withdraw queued inputs, then answer `input` if given. The aborted
-	 * partial answer stays in the transcript, so the model knows what it had already said.
+	 * partial answer stays in storage, but durable leaves it out of model context: to tell the model what it had already
+	 * said, put that in `input`.
 	 */
 	async interrupt(
 		principal: Principal,
 		sessionId: string,
 		input: unknown,
-		ids: Pick<PromptOptions, "requestId" | "turnId">,
+		ids: Pick<PromptOptions, "requestId" | "turnId" | "traceparent" | "duringTools">,
 		context: Context,
 	): Promise<Admitted | undefined> {
-		const { requestId } = ids;
+		const { requestId, turnId, traceparent } = ids;
+		const prompted = {
+			...(requestId === undefined ? {} : { requestId }),
+			...(turnId === undefined ? {} : { turnId }),
+			...(traceparent === undefined ? {} : { traceparent }),
+		};
 		if (input !== undefined) this.#input(input);
 		const { conversation } = await this.#deps.store.require(principal, sessionId, context);
 		// A retry must not abort again: that would stop the run its first attempt started. `prompt` returns that outcome.
 		const retry = requestId !== undefined && (await this.#earlier(conversation, requestId, context)) !== undefined;
-		if (!retry) await conversation.abort(context);
+		if (!retry) {
+			if (input !== undefined && ids.duringTools === "steer") {
+				const live = await this.#deps.harness.snapshot(LiveDoc, conversation.id, context);
+				if ((live?.tools?.length ?? 0) > 0) return this.prompt(principal, sessionId, input, { ...prompted, whenBusy: "steer" }, context);
+			}
+			await conversation.abort(context);
+		}
 		if (input === undefined) return undefined;
-		return this.prompt(principal, sessionId, input, ids, context);
+		return this.prompt(principal, sessionId, input, prompted, context);
 	}
 
 	async cancel(principal: Principal, sessionId: string, context: Context): Promise<void> {
@@ -311,6 +356,7 @@ export class AgentService {
 			speech: profile.speech,
 			thinking: profile.thinkingEvents,
 			...(transform === undefined ? {} : { transform }),
+			observe: toolSpans(async () => (await currentTurnRecord(this.#deps.harness, conversation.id, BACKGROUND_CONTEXT))?.traceparent),
 		});
 	}
 

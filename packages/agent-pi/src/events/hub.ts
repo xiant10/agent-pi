@@ -20,7 +20,11 @@ export type Subscription = {
 };
 
 /** How a hub's mapper is configured, plus an optional transform of every client event (plugins' `mapEvent`). */
-export type HubMapping = MapperOptions & { readonly transform?: (event: ClientEventBody) => ClientEventBody[] };
+export type HubMapping = MapperOptions & {
+	readonly transform?: (event: ClientEventBody) => ClientEventBody[];
+	/** Sees every event as it happened, whatever `transform` makes of it. */
+	readonly observe?: (event: ClientEventBody) => void;
+};
 
 export type HubOptions = {
 	/** Events kept for `Last-Event-ID` resume. Default 1024. */
@@ -85,10 +89,11 @@ export class SessionHub {
 	): Promise<SessionHub> {
 		const stream = await watchEvents(harness, conversationId, BACKGROUND_CONTEXT);
 		const hub = new SessionHub(conversationId, stream, new EventMapper(mapping), options, onStop);
-		const { transform } = mapping;
+		const { transform, observe } = mapping;
 		stream.start(async (events) => {
 			for (const event of events) {
 				for (const body of hub.#mapper.map(event)) {
+				observe?.(body);
 					// Snapshots carry the hub's own state; they are not for plugins to change.
 					if (transform === undefined || body.type === "snapshot") hub.#publish(body);
 					else for (const mapped of transform(body)) hub.#publish(mapped);

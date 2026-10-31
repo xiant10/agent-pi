@@ -8,11 +8,16 @@ import type { ClientEvent } from "../events/hub.ts";
 import { validTurnId } from "../identity.ts";
 import type { Admitted, AgentService, PromptOptions } from "../service.ts";
 import type { Logger } from "../util/log.ts";
+import { validTraceparent } from "../util/tracing.ts";
 import { SseStream } from "./sse.ts";
 
 export const SESSION_HEADER = "agent-session-id";
 /** Names the turn a prompt starts; the `turnId` param wins. */
 export const TURN_HEADER = "x-turn-id";
+/** The W3C trace context of the client's turn. */
+export const TRACE_HEADER = "traceparent";
+/** Names the submission a streamed run answers, before its first event; absent when a plugin answered. */
+export const SUBMISSION_HEADER = "agent-submission-id";
 
 /** Methods the transport defines; plugins add others. */
 export const CORE_METHODS = [
@@ -285,7 +290,7 @@ async function streamRun(
 			return;
 		}
 		ours = admitted.submission.id;
-		const stream = new SseStream(res, options.keepAliveMs, { [SESSION_HEADER]: sessionId });
+		const stream = new SseStream(res, options.keepAliveMs, { [SESSION_HEADER]: sessionId, [SUBMISSION_HEADER]: String(ours) });
 		sse = stream;
 		for (const event of pending.splice(0)) stream.send(notification(sessionId, event), event.id);
 		stream.onClose(() => {
@@ -360,20 +365,30 @@ function wantsStream(req: IncomingMessage, request: RpcRequest): boolean {
 	return (req.headers.accept ?? "").includes("text/event-stream");
 }
 
-/** The turn id is the `turnId` param, else the `X-Turn-ID` header; absent, the service generates one. */
+/**
+ * The turn id is the `turnId` param, else the `X-Turn-ID` header; absent, the service generates one. A malformed
+ * `traceparent` is ignored rather than refused: tracing never fails a request.
+ */
 function promptOptions(params: Record<string, unknown>, req: IncomingMessage): PromptOptions {
 	const requestId = optionalString(params.requestId, "requestId");
 	const header = req.headers[TURN_HEADER];
 	const turnId = optionalString(params.turnId, "turnId") ?? (typeof header === "string" && header.length > 0 ? header : undefined);
 	if (turnId !== undefined && !validTurnId(turnId)) throw invalidParams("turnId must be 1-128 characters of A-Z a-z 0-9 . _ : -");
+	const traceparent = req.headers[TRACE_HEADER];
 	const whenBusy = params.whenBusy;
 	if (whenBusy !== undefined && whenBusy !== "followUp" && whenBusy !== "steer" && whenBusy !== "reject") {
 		throw invalidParams('whenBusy must be "followUp", "steer", or "reject"');
 	}
+	const duringTools = params.duringTools;
+	if (duringTools !== undefined && duringTools !== "abort" && duringTools !== "steer") {
+		throw invalidParams('duringTools must be "abort" or "steer"');
+	}
 	return {
 		...(requestId === undefined ? {} : { requestId }),
 		...(turnId === undefined ? {} : { turnId }),
+		...(typeof traceparent === "string" && validTraceparent(traceparent) ? { traceparent } : {}),
 		...(whenBusy === undefined ? {} : { whenBusy }),
+		...(duringTools === undefined ? {} : { duringTools }),
 	};
 }
 

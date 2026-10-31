@@ -35,7 +35,8 @@ describe("CredentialStore.sweep", () => {
 		const working = (conversationId: unknown) => conversationId === id(2);
 		store.sweep(60_000, working, now + 30_000);
 		expect([1, 2, 3].map((n) => store.get(id(n)) !== undefined)).toEqual([true, true, false]);
-		store.sweep(60_000, working, now + 60_000);
+		// From after the sets: `seen` can be a millisecond past `now` on a slow machine.
+		store.sweep(60_000, working, Date.now() + 60_000);
 		expect([1, 2].map((n) => store.get(id(n)) !== undefined)).toEqual([false, true]);
 	});
 });

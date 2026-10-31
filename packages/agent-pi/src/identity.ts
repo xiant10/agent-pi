@@ -15,6 +15,7 @@ import {
 import { readSession } from "./agent/docs.ts";
 import type { Principal } from "./auth/authenticator.ts";
 import type { CredentialStore } from "./auth/credentials.ts";
+import { startSpan } from "./util/tracing.ts";
 
 /**
  * Who a model call is for, so a gateway in front of the model can audit it: the session (a whole conversation), the
@@ -34,6 +35,8 @@ export type CallContext = CallIdentity & {
 	readonly metadata?: JsonObject;
 	/** The newest verified caller, with its claims; absent for work resumed after a restart until the user calls again. */
 	readonly principal?: Principal;
+	/** Where this call's span belongs in the turn's trace, when the client is tracing it. */
+	readonly traceparent?: string;
 };
 
 /**
@@ -63,8 +66,11 @@ export function validTurnId(value: string): boolean {
 	return TURN_ID.test(value);
 }
 
-/** The turn each submission belongs to, newest last; old ones are dropped. */
-const TurnsDoc = defineDoc<{ bySubmission: Record<string, string> } & JsonObject>({
+/**
+ * The turn each submission belongs to, newest last; old ones are dropped. `traceparents` holds where that turn's work
+ * goes in its trace. It is durable so a run resumed after a restart stays in its trace, and absent in older documents.
+ */
+const TurnsDoc = defineDoc<{ bySubmission: Record<string, string>; traceparents?: Record<string, string> } & JsonObject>({
 	kind: "app.turns",
 	version: 1,
 	scope: "conversation",
@@ -76,15 +82,26 @@ const TurnsDoc = defineDoc<{ bySubmission: Record<string, string> } & JsonObject
 const MAX_TURNS = 200;
 
 /** Remember `turnId` for a submission; a retry of the same submission keeps its first turn id, which is returned. */
-export function recordTurn(conversation: Conversation, submissionId: number, turnId: string, context: Context): Promise<string> {
+export function recordTurn(
+	conversation: Conversation,
+	submissionId: number,
+	turnId: string,
+	traceparent: string | undefined,
+	context: Context,
+): Promise<string> {
 	return conversation.commit(async (tx) => {
 		const doc = await tx.doc(TurnsDoc, conversation.id);
 		const key = String(submissionId);
 		const existing = doc.bySubmission[key];
 		if (existing !== undefined) return existing;
 		doc.bySubmission[key] = turnId;
+		// Assigned whole: a document keeps a copy of a new object, so a write through the original would be lost.
+		if (traceparent !== undefined) doc.traceparents = { ...doc.traceparents, [key]: traceparent };
 		const keys = Object.keys(doc.bySubmission);
-		for (const old of keys.slice(0, Math.max(0, keys.length - MAX_TURNS))) delete doc.bySubmission[old];
+		for (const old of keys.slice(0, Math.max(0, keys.length - MAX_TURNS))) {
+			delete doc.bySubmission[old];
+			if (doc.traceparents !== undefined) delete doc.traceparents[old];
+		}
 		return turnId;
 	}, context);
 }
@@ -95,9 +112,22 @@ export function recordTurn(conversation: Conversation, submissionId: number, tur
  * before the record exists; wait for it briefly.
  */
 export async function currentTurn(reader: unknown, conversationId: ConversationId, context: Context): Promise<string | undefined> {
+	return (await currentTurnRecord(reader, conversationId, context))?.turnId;
+}
+
+/** `currentTurn`, with where its work goes in the turn's trace. */
+export async function currentTurnRecord(
+	reader: unknown,
+	conversationId: ConversationId,
+	context: Context,
+): Promise<{ readonly turnId: string; readonly traceparent?: string } | undefined> {
 	const read = reader as {
 		snapshot(doc: typeof LiveDoc, id: ConversationId, context: Context): Promise<Readonly<{ run?: { inputs: number[] } }> | undefined>;
-		snapshot(doc: typeof TurnsDoc, id: ConversationId, context: Context): Promise<Readonly<{ bySubmission: Record<string, string> }> | undefined>;
+		snapshot(
+			doc: typeof TurnsDoc,
+			id: ConversationId,
+			context: Context,
+		): Promise<Readonly<{ bySubmission: Record<string, string>; traceparents?: Record<string, string> }> | undefined>;
 	};
 	for (let attempt = 0; attempt < 12; attempt++) {
 		const live = await read.snapshot(LiveDoc, conversationId, context);
@@ -105,8 +135,11 @@ export async function currentTurn(reader: unknown, conversationId: ConversationI
 		if (inputs.length === 0) return undefined;
 		const turns = await read.snapshot(TurnsDoc, conversationId, context);
 		for (let at = inputs.length - 1; at >= 0; at--) {
-			const turn = turns?.bySubmission[String(inputs[at])];
-			if (turn !== undefined) return turn;
+			const key = String(inputs[at]);
+			const turnId = turns?.bySubmission[key];
+			if (turnId === undefined) continue;
+			const traceparent = turns?.traceparents?.[key];
+			return traceparent === undefined ? { turnId } : { turnId, traceparent };
 		}
 		await new Promise((resolve) => setTimeout(resolve, 25));
 	}
@@ -116,6 +149,20 @@ export async function currentTurn(reader: unknown, conversationId: ConversationI
 /** Identities of the conversations that are generating, by the provider session id pi-durable passes to the model. */
 export class IdentityRegistry {
 	readonly #byProviderSession = new Map<string, CallContext>();
+	readonly #parents = new Map<ConversationId, ConversationId>();
+
+	/** A child conversation, such as a consulted expert, makes its model calls for its parent's session and turn. */
+	adopt(child: ConversationId, parent: ConversationId): void {
+		this.#parents.set(child, parent);
+	}
+
+	release(child: ConversationId): void {
+		this.#parents.delete(child);
+	}
+
+	parentOf(conversationId: ConversationId): ConversationId | undefined {
+		return this.#parents.get(conversationId);
+	}
 
 	set(providerSessionId: string, identity: CallContext): void {
 		this.#byProviderSession.delete(providerSessionId);
@@ -165,6 +212,48 @@ export function withIdentityHeaders(
 	};
 }
 
+/**
+ * `streams` that record a span for every model request of a conversation in a traced turn. This wraps the provider call
+ * itself rather than a durable hook, so a request that really was sent twice shows twice and a replay shows nothing.
+ * With `forward`, the gateway gets the span as its `traceparent`, to continue the trace.
+ */
+export function withModelSpans(streams: ProviderStreams, registry: IdentityRegistry, forward: boolean): ProviderStreams {
+	const traced = <T extends StreamOptions | SimpleStreamOptions>(
+		model: Parameters<ProviderStreams["stream"]>[0],
+		options: T | undefined,
+		send: (options: T | undefined) => ReturnType<ProviderStreams["stream"]>,
+	) => {
+		const parent = registry.get(options?.sessionId)?.traceparent;
+		if (parent === undefined) return send(options);
+		const span = startSpan("agent.model", {
+			traceparent: parent,
+			attributes: { "gen_ai.provider.name": model.provider, "gen_ai.request.model": model.id },
+		});
+		const headers: ProviderHeaders = { ...options?.headers };
+		if (forward && span.traceparent !== undefined) headers.traceparent = span.traceparent;
+		const stream = send({ ...options, headers } as T);
+		void stream.result().then(
+			(message) => {
+				span.setAttributes({
+					"gen_ai.response.finish_reason": message.stopReason,
+					"gen_ai.usage.input_tokens": message.usage.input,
+					"gen_ai.usage.output_tokens": message.usage.output,
+				});
+				span.end(message.stopReason === "error" ? (message.errorMessage ?? "model error") : undefined);
+			},
+			(error: unknown) => span.end(String(error)),
+		);
+		return stream;
+	};
+	return {
+		...streams,
+		stream: (model, context, options) => traced(model, options, (sent) => streams.stream(model, context, sent)),
+		streamSimple: (model, context, options) => traced(model, options, (sent) => streams.streamSimple(model, context, sent)),
+		...(streams.fetchDeferred === undefined ? {} : { fetchDeferred: streams.fetchDeferred.bind(streams) }),
+		...(streams.cancelDeferred === undefined ? {} : { cancelDeferred: streams.cancelDeferred.bind(streams) }),
+	};
+}
+
 /** Header values are Latin-1 and single-line; anything else, such as a Chinese display name, is percent-encoded. */
 function headerValue(value: string): string {
 	const text = value.replace(/[\r\n]+/g, " ").trim();
@@ -185,15 +274,17 @@ export function identityExtension(
 		hooks: [
 			hook(GenerationTask, {
 				beforeRequest: async (_request, api, context) => {
-					const session = await readSession(api, api.conversationId, context);
+					const owner = registry.parentOf(api.conversationId) ?? api.conversationId;
+					const session = await readSession(api, owner, context);
 					if (session === undefined) return undefined;
 					const provider = await api.snapshot(ProviderDoc, api.conversationId, context);
 					if (provider === undefined) return undefined;
 					const principal = credentials.get(api.conversationId);
-					const turnId = await currentTurn(api, api.conversationId, context);
+					const turn = await currentTurnRecord(api, owner, context);
 					registry.set(provider.sessionId, {
-						sessionId: publicId(api.conversationId),
-						...(turnId === undefined ? {} : { turnId }),
+						sessionId: publicId(owner),
+						...(turn === undefined ? {} : { turnId: turn.turnId }),
+						...(turn?.traceparent === undefined ? {} : { traceparent: turn.traceparent }),
 						userId: session.userId,
 						...(session.userName === undefined ? {} : { userName: session.userName }),
 						...(session.tenantId === undefined ? {} : { tenantId: session.tenantId }),
