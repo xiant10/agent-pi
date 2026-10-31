@@ -17,6 +17,9 @@ export type RunOptions = StartOptions & {
  * A process entry point: loads `.env` and the config, starts the agent, logs process failures as JSON lines, and
  * shuts down cleanly on SIGTERM and SIGINT, so unfinished runs resume on the next start.
  */
+/** How long a failed process may drain before it exits regardless. */
+const FAILURE_EXIT_MS = 10_000;
+
 export async function runAgent(options: RunOptions): Promise<RunningAgent> {
 	const { config, envFile, ...start } = options;
 	loadDotEnv(envFile);
@@ -38,19 +41,28 @@ export async function runAgent(options: RunOptions): Promise<RunningAgent> {
 	const stopTracing = setupTracing();
 	const agent = await startAgent(resolved, start);
 	let stopping = false;
-	const stop = (signal: string) => {
+	const stop = (exitCode: number) => {
 		if (stopping) return;
 		stopping = true;
-		log("info", "agent.signal", { signal });
 		agent.close().then(
-			() => (stopTracing?.() ?? Promise.resolve()).finally(() => process.exit(0)),
+			() => (stopTracing?.() ?? Promise.resolve()).finally(() => process.exit(exitCode)),
 			(error: unknown) => {
 				console.error(error);
 				process.exit(1);
 			},
 		);
 	};
-	process.once("SIGTERM", () => stop("SIGTERM"));
-	process.once("SIGINT", () => stop("SIGINT"));
+	const onSignal = (signal: string) => {
+		log("info", "agent.signal", { signal });
+		stop(0);
+	};
+	process.once("SIGTERM", () => onSignal("SIGTERM"));
+	process.once("SIGINT", () => onSignal("SIGINT"));
+	// This process cannot serve again; exit so the supervisor starts one that reopens the storage.
+	void agent.failed.then((error) => {
+		log("error", "agent.failed", { error: error instanceof Error ? error.message : String(error) });
+		setTimeout(() => process.exit(1), FAILURE_EXIT_MS).unref();
+		stop(1);
+	});
 	return agent;
 }

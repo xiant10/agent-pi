@@ -2,7 +2,7 @@
 import { createModels } from "@earendil-works/pi-ai/models";
 import { type FauxProviderHandle, type FauxResponseStep, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { getCurrentTools } from "@earendil-works/pi-ai/utils/transcript";
-import { MemoryStorage } from "@earendil-works/pi-durable";
+import { MemoryStorage, type Storage } from "@earendil-works/pi-durable";
 import { type JsonRpcMessage, type JsonRpcRequest, LATEST_PROTOCOL_VERSION } from "@earendil-works/pi-mcp";
 import { createInMemoryTransportPair } from "@earendil-works/pi-mcp/testing";
 import { type RunningAgent, type StartOptions, startAgent } from "./app.ts";
@@ -121,6 +121,8 @@ export async function startTestAgent(options: {
 	readonly tokensPerSecond?: number;
 	/** Use the config's storage instead of a fresh MemoryStorage, to test restarts. */
 	readonly configStorage?: boolean;
+	/** Use this storage instead of a fresh MemoryStorage. */
+	readonly storage?: Storage;
 	readonly mcpTransport?: StartOptions["mcpTransport"];
 	readonly plugins?: readonly AgentPlugin[];
 } = {}): Promise<TestAgent> {
@@ -133,7 +135,7 @@ export async function startTestAgent(options: {
 	});
 	const agent = await startAgent(config, {
 		log: SILENT_LOGGER,
-		...(options.configStorage === true ? {} : { storage: new MemoryStorage() }),
+		...(options.configStorage === true ? {} : { storage: options.storage ?? new MemoryStorage() }),
 		models: {
 			models,
 			refs: new Map([

@@ -18,6 +18,7 @@ import {
 import { assistantText } from "./agent/core-extension.ts";
 import { SessionDoc, type SessionState, ToolStateDoc } from "./agent/docs.ts";
 import { pinnedTools, preloadTools, type Profile } from "./agent/profiles.ts";
+import { parkedTasks } from "./agent/parked.ts";
 import { ownerKey, type Principal } from "./auth/authenticator.ts";
 import type { CredentialStore } from "./auth/credentials.ts";
 import type { LimitsConfig } from "./config.ts";
@@ -88,6 +89,8 @@ export type Admitted =
 
 export type SessionDetails = SessionInfo & {
 	readonly busy: boolean;
+	/** Tasks parked after repeated crashes; the session stays busy until `retry` or `cancel`. */
+	readonly parked: number;
 	readonly activeTools: readonly string[];
 	readonly usage: JsonObject;
 };
@@ -143,6 +146,7 @@ export class AgentService {
 		return {
 			...this.#deps.store.info(conversation.id, session),
 			busy: live?.run !== undefined,
+			parked: (await parkedTasks(this.#deps.harness, conversation.id, context)).length,
 			activeTools: Array.isArray(agent?.tools) ? [...agent.tools] : [],
 			usage: (usage ?? {}) as JsonObject,
 		};
@@ -333,6 +337,15 @@ export class AgentService {
 	async cancel(principal: Principal, sessionId: string, context: Context): Promise<void> {
 		const { conversation } = await this.#deps.store.require(principal, sessionId, context);
 		await conversation.abort(context);
+	}
+
+	/** Run the session's tasks the crash-loop guard parked again. Each may be cut off `restartLimit` more times. */
+	async retry(principal: Principal, sessionId: string, context: Context): Promise<number> {
+		const { conversation } = await this.#deps.store.require(principal, sessionId, context);
+		const parked = await parkedTasks(this.#deps.harness, conversation.id, context);
+		for (const id of parked) await this.#deps.harness.retryTask(id, context);
+		this.#deps.log.info("session.retried", { sessionId, tasks: parked });
+		return parked.length;
 	}
 
 	async close(principal: Principal, sessionId: string, context: Context): Promise<void> {

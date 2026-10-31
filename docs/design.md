@@ -175,6 +175,7 @@ Methods:
 | `session.steer` | `{ input, requestId? }` | `{ submissionId, placement }` |
 | `session.interrupt` | `{ input?, requestId? }` | like `session.prompt`, or `{ aborted: true }` |
 | `session.cancel` | `{}` | `{ aborted: true }` |
+| `session.retry` | `{}` | `{ retried }` |
 | `session.close` | `{}` | `{ closed: true }` |
 | `skills.list` | `{}` | `{ skills: [{ name, description }] }` |
 
@@ -326,7 +327,7 @@ the voice app can play a filler phrase on `tool.started` for `consult_expert`.
 
 - The image is built from the repository root with `apps/<app>/Dockerfile`. It runs the app's `src/main.ts` (Node strips
   types; no build step) as the unprivileged `node` user.
-- `GET /healthz` (process up) and `GET /readyz` (listening and not shutting down; the detail lists each MCP server's
+- `GET /healthz` (process up) and `GET /readyz` (listening, not shutting down, and durable has not failed; the detail lists each MCP server's
   state, but a server that is down does not make the replica unready, since its tools join when it connects) are
   unauthenticated.
 - SIGTERM: stop accepting, send `server.shutdown` on open streams so clients reconnect, close the HTTP server, MCP

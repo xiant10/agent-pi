@@ -567,8 +567,13 @@ The assistant's `Dockerfile` and `docker-compose.yml` are the template. The imag
 `skills`, and `content`, and runs `src/main.ts` as the unprivileged `node` user.
 
 - **State**: the SQLite file lives on a volume (`AGENT_DATA_DIR=/data`). Losing it loses sessions.
-- **Probes**: `GET /healthz` (process up), `GET /readyz` (listening, not shutting down; the detail lists MCP server
-  states). Neither needs auth.
+- **Probes**: `GET /healthz` (process up), `GET /readyz` (listening, not shutting down, durable has not failed; the
+  detail lists MCP server states). Neither needs auth.
+- **Storage failure**: durable treats any storage error as fatal. `/readyz` turns 503 and `runAgent` drains and exits 1,
+  so run it under a restart policy. Unfinished runs resume in the new process.
+- **Crash loops**: a task cut off `durable.restartLimit` times in a row (default 5) without progress is parked and logged
+  as `durable.task_parked`. Its session stays busy and `session.get` shows `parked`. `session.retry` runs the session's
+  parked tasks again; `session.cancel` and `session.interrupt` give up on them.
 - **Shutdown**: SIGTERM ends event streams (clients reconnect), finishes commits, and closes storage. Give it time
   (`stop_grace_period: 30s`); unfinished runs resume on the next start.
 - **Scaling**: storage has one owner process, so run N replicas each with its own volume and `AGENT_INSTANCE_ID`.

@@ -50,6 +50,8 @@ export type AppConfig = {
 		readonly stream: { readonly timeoutMs?: number; readonly cacheRetention?: "none" | "short" | "long" };
 		readonly compaction: { readonly enabled?: boolean; readonly reserveTokens?: number; readonly keepRecentTokens?: number };
 		readonly retry: { readonly maxRetries?: number; readonly baseDelayMs?: number };
+		/** Crashes in a row without progress before a task is parked. Default 5. */
+		readonly restartLimit?: number;
 	};
 	readonly logLevel: "debug" | "info" | "warn" | "error";
 };
@@ -270,6 +272,7 @@ export function loadConfig(path: string): AppConfig {
 	const instanceId = r.optionalString(raw.instanceId, "instanceId");
 	if (instanceId !== undefined && !/^[A-Za-z0-9_-]+$/.test(instanceId)) r.fail("instanceId", "must match [A-Za-z0-9_-]+");
 	const timeoutMs = r.optionalNumber(stream.timeoutMs, "durable.stream.timeoutMs");
+	const restartLimit = r.optionalNumber(durable.restartLimit, "durable.restartLimit");
 	const cacheRetention =
 		stream.cacheRetention === undefined
 			? undefined
@@ -305,6 +308,7 @@ export function loadConfig(path: string): AppConfig {
 			keepAliveMs: r.number(http.keepAliveMs, "http.keepAliveMs", 15_000),
 		},
 		durable: {
+			...(restartLimit === undefined ? {} : { restartLimit }),
 			stream: {
 				...(timeoutMs === undefined ? {} : { timeoutMs }),
 				...(cacheRetention === undefined ? {} : { cacheRetention }),

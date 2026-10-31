@@ -16,6 +16,7 @@ import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite
 import { coreExtension, instructionsExtension } from "./agent/core-extension.ts";
 import { createConfiguredModels } from "./agent/models.ts";
 import type { Profile } from "./agent/profiles.ts";
+import { parkedTasks } from "./agent/parked.ts";
 import type { Authenticator } from "./auth/authenticator.ts";
 import { CredentialStore } from "./auth/credentials.ts";
 import { JwtAuthenticator } from "./auth/jwt.ts";
@@ -64,6 +65,11 @@ export type RunningAgent = {
 	readonly catalog: ToolCatalog;
 	readonly container: Container;
 	readonly instanceId: string;
+	/**
+	 * Settles, with the cause, if durable fails: after a storage error every call rejects until a new process opens the
+	 * storage, so a host should `close()` and exit. Never rejects, and stays pending otherwise.
+	 */
+	readonly failed: Promise<unknown>;
 	/** Stop accepting, end streams, finish commits, close MCP and storage. Unfinished runs resume on the next start. */
 	close(): Promise<void>;
 };
@@ -122,7 +128,10 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 		stream: config.durable.stream,
 		retry: config.durable.retry,
 		compaction: config.durable.compaction,
+		...(config.durable.restartLimit === undefined ? {} : { restartLimit: config.durable.restartLimit }),
 	};
+	const failure = Promise.withResolvers<unknown>();
+	let failed = false;
 	const { models } = await container.get(Services.models);
 	const harness = await Harness.open(
 		storage,
@@ -130,8 +139,18 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 			models,
 			registry,
 			settings,
-			onReport: (error) =>
-				log.warn("durable.report", { error: error instanceof Error ? error.message : String(error) }),
+			onReport: (error, info) => {
+				const message = error instanceof Error ? error.message : String(error);
+				if (info.type === "session_failed") {
+					failed = true;
+					log.error("durable.session_failed", { error: message });
+					failure.resolve(error);
+				} else if (info.type === "task_parked") {
+					log.error("durable.task_parked", { error: message, ...info.task });
+				} else {
+					log.warn("durable.report", { type: info.type, error: message });
+				}
+			},
 		},
 		context,
 	);
@@ -158,6 +177,9 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 	await plugins.setup(container, config, catalog);
 	// Continue runs the previous process left unfinished, now that plugin hooks have their services.
 	harness.resume();
+	// Durable reports a task once, when it parks it; one parked by an earlier process would otherwise go unnoticed.
+	const parked = await parkedTasks(harness, undefined, context);
+	if (parked.length > 0) log.error("durable.tasks_parked", { tasks: parked });
 	// Sessions created right after startup should see the tools of every reachable server; slow servers join later.
 	await mcp.start(options.mcpStartupWaitMs ?? 10_000);
 
@@ -171,7 +193,7 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 		allowedOrigins: config.http.allowedOrigins,
 		keepAliveMs: config.http.keepAliveMs,
 		maxBodyBytes: config.limits.maxBodyBytes,
-		readiness: () => ({ ready: !closing, detail: { instanceId, tools: catalog.size, mcp: mcp.status() } }),
+		readiness: () => ({ ready: !closing && !failed, detail: { instanceId, tools: catalog.size, mcp: mcp.status() } }),
 	});
 	// Tokens of sessions nobody has called for a while leave memory; a working session keeps its caller's token.
 	const credentialSweep = setInterval(() => credentials.sweep(CREDENTIAL_IDLE_MS, (id) => service.isWorking(id)), 60_000);
@@ -195,6 +217,7 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 		catalog,
 		container,
 		instanceId,
+		failed: failure.promise,
 		close: async () => {
 			if (closing) return;
 			closing = true;

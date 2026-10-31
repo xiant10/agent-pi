@@ -13,6 +13,7 @@
 		"start": "node --disable-warning=ExperimentalWarning apps/assistant/src/main.ts",
 		"check": "tsc --noEmit",
 		"smoke": "node --disable-warning=ExperimentalWarning apps/assistant/scripts/smoke.ts",
+		"mock:compare": "bash scripts/mock/compare.sh",
 		"test": "vitest --run"
 	},
 	"devDependencies": {

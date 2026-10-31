@@ -14,7 +14,8 @@ A reusable multi-user agent harness on [`@earendil-works/pi-durable`](https://ww
 
 Building a new agent on the package: [`docs/developer-guide.md`](docs/developer-guide.md). Design and rationale:
 [`docs/design.md`](docs/design.md). End-to-end lifecycle with every plugin hook point:
-[`docs/lifecycle.md`](docs/lifecycle.md).
+[`docs/lifecycle.md`](docs/lifecycle.md). Testing without a real model:
+[`docs/mock-model.md`](docs/mock-model.md).
 
 ## Layout
 
@@ -128,11 +129,12 @@ The session is named by the `Agent-Session-Id` header or `params.sessionId`.
 |---|---|---|
 | `session.create` | `profile?`, `metadata?` | `{ sessionId, profile, createdAt }` |
 | `session.list` | | `{ sessions }` |
-| `session.get` | | `{ sessionId, profile, busy, activeTools, usage }` |
+| `session.get` | | `{ sessionId, profile, busy, parked, activeTools, usage }` |
 | `session.prompt` | `input`, `requestId?`, `turnId?`, `whenBusy?` (`followUp`, `steer`, `reject`), `wait?`, `abortOnDisconnect?` | `{ turnId, submissionId, status, reason?, detail?, text? }`, or `{ turnId, status: "done", answeredBy, text, placement }` when a plugin answered (`placement: "queued"` when the session was busy) |
 | `session.steer` | `input`, `requestId?`, `turnId?` | `{ turnId, submissionId, placement }` |
 | `session.interrupt` | `input?`, `requestId?`, `turnId?`, `duringTools?` (`abort`, `steer`) | like `session.prompt`, or `{ aborted: true }` |
 | `session.cancel` | | `{ aborted: true }` |
+| `session.retry` | | `{ retried }`: runs tasks parked after repeated crashes again |
 | `session.close` | | `{ closed: true }` |
 | `skills.list` | | `{ skills }` |
 | *plugin methods* | as the plugin defines | as the plugin returns |

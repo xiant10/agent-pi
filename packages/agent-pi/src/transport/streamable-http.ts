@@ -28,6 +28,7 @@ export const CORE_METHODS = [
 	"session.steer",
 	"session.interrupt",
 	"session.cancel",
+	"session.retry",
 	"session.close",
 	"skills.list",
 ] as const;
@@ -155,6 +156,8 @@ async function dispatch(
 		case "session.cancel":
 			await service.cancel(principal, session(), context);
 			return { result: { aborted: true } };
+		case "session.retry":
+			return { result: { retried: await service.retry(principal, session(), context) } };
 		case "session.close":
 			await service.close(principal, session(), context);
 			return { result: { closed: true } };
