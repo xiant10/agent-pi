@@ -93,13 +93,13 @@ function loadSkillTool(deps: CoreDeps): ToolRegistration {
 			const skill = byName.get(args.name);
 			if (skill === undefined) {
 				const available = [...byName.keys()].join(", ") || "none";
-				return { isError: true, content: [{ type: "text", text: `Unknown skill ${JSON.stringify(args.name)}. Available: ${available}` }] };
+				return { isError: true, output: [{ type: "text", text: `Unknown skill ${JSON.stringify(args.name)}. Available: ${available}` }] };
 			}
 			if (args.file !== undefined) {
 				try {
-					return { content: [{ type: "text", text: readSkillFile(skill, args.file) }] };
+					return { output: [{ type: "text", text: readSkillFile(skill, args.file) }] };
 				} catch (error) {
-					return { isError: true, content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }] };
+					return { isError: true, output: [{ type: "text", text: error instanceof Error ? error.message : String(error) }] };
 				}
 			}
 			const profile = await profileFor(deps, api, context);
@@ -114,7 +114,7 @@ function loadSkillTool(deps: CoreDeps): ToolRegistration {
 				: names.length > 0
 					? `\n\nTools enabled for this skill: ${names.join(", ")}`
 					: "";
-			return { content: [{ type: "text", text: `${skill.body}${footer}` }], details: { skill: skill.name, added } };
+			return { output: [{ type: "text", text: `${skill.body}${footer}` }], details: { skill: skill.name, added } };
 		},
 	});
 }
@@ -132,7 +132,7 @@ function searchToolsTool(deps: CoreDeps): ToolRegistration {
 		replay: "safe",
 		execute: async (args, api, context) => {
 			const hits = deps.catalog.search(args.query, args.limit ?? 5);
-			if (hits.length === 0) return { content: [{ type: "text", text: "No tools matched. Try other words." }] };
+			if (hits.length === 0) return { output: [{ type: "text", text: "No tools matched. Try other words." }] };
 			const profile = await profileFor(deps, api, context);
 			const names = hits.map((hit) => hit.entry.name);
 			const { added } = await api.commit(
@@ -141,7 +141,7 @@ function searchToolsTool(deps: CoreDeps): ToolRegistration {
 			);
 			const lines = hits.map((hit) => `- ${hit.entry.name}: ${firstSentence(hit.entry.description)}`);
 			return {
-				content: [{ type: "text", text: `Enabled these tools; call them directly:\n${lines.join("\n")}` }],
+				output: [{ type: "text", text: `Enabled these tools; call them directly:\n${lines.join("\n")}` }],
 				details: { added },
 			};
 		},
@@ -167,7 +167,7 @@ function expertTool(deps: CoreDeps): ToolRegistration {
 			const profile = await profileFor(deps, api, context);
 			const expert = profile.expert ?? deps.defaultProfile.expert;
 			if (expert === undefined) {
-				return { isError: true, content: [{ type: "text", text: "No expert model is configured for this session." }] };
+				return { isError: true, output: [{ type: "text", text: "No expert model is configured for this session." }] };
 			}
 			const child = await api.commit(async (tx) => {
 				const existing = (await tx.scanConversations({ ownerTaskId: api.taskId }, 1)).items[0];
@@ -201,10 +201,10 @@ function expertTool(deps: CoreDeps): ToolRegistration {
 				deps.identity.release(child);
 			}
 			if (settled.status !== "done" || settled.type !== "input") {
-				return { isError: true, content: [{ type: "text", text: `The expert could not answer (${settled.reason ?? settled.status}).` }] };
+				return { isError: true, output: [{ type: "text", text: `The expert could not answer (${settled.reason ?? settled.status}).` }] };
 			}
 			const answer = await api.commit((tx) => tx.entry(AssistantEntry, settled.answer), context);
-			return { content: [{ type: "text", text: assistantText(answer?.model?.[0]) || "(no answer)" }] };
+			return { output: [{ type: "text", text: assistantText(answer?.model?.[0]) || "(no answer)" }] };
 		},
 	});
 }

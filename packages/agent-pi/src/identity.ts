@@ -77,6 +77,7 @@ const TurnsDoc = defineDoc<{ bySubmission: Record<string, string>; traceparents?
 	history: "latest",
 	fork: "current",
 	initial: () => ({ bySubmission: {} }),
+	checkpointWhen: () => false,
 });
 
 const MAX_TURNS = 200;

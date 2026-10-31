@@ -31,6 +31,7 @@ export const PluginStateDoc = defineDocFamily<{ value?: JsonValue } & JsonObject
 	history: "latest",
 	fork: "current",
 	initial: () => ({}),
+	checkpointWhen: () => false,
 });
 
 /** A plugin's answer to an input: who wrote it, and whether it is in the transcript or queued for the next boundary. */
@@ -53,6 +54,7 @@ export const ReplyRequestsDoc = defineDoc<{ replies: Record<string, ReplyRecord>
 	history: "latest",
 	fork: "current",
 	initial: () => ({ replies: {} }),
+	checkpointWhen: () => false,
 });
 
 /** Most remembered reply request ids per conversation; a client retries within seconds, not hundreds of turns. */
@@ -83,7 +85,7 @@ export function userMessage(input: UserInput): UserMessage {
  * each entry's first message.
  *
  * Idle: appended in one commit, in order. Busy: admitted as write submissions, which the harness places at the next
- * boundary, so a running tool round is never split.
+ * boundary, so a running tool round is never split; one without a model message (a `record`) is appended at once.
  */
 export async function appendWithoutModel(
 	harness: Harness,

@@ -297,8 +297,8 @@ const orderStatus = defineTool({
 	replay: "safe",
 	execute: async (args) => {
 		const order = await orders.get(args.orderId);
-		if (order === undefined) return { isError: true, content: [{ type: "text", text: "No such order." }] };
-		return { content: [{ type: "text", text: `${order.status}, arriving ${order.eta}` }] };
+		if (order === undefined) return { isError: true, output: [{ type: "text", text: "No such order." }] };
+		return { output: [{ type: "text", text: `${order.status}, arriving ${order.eta}` }] };
 	},
 });
 

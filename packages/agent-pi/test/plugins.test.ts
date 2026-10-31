@@ -85,7 +85,7 @@ describe("beforePrompt", () => {
 			name: "order_status",
 			description: "Status of an order by number.",
 			parameters: Type.Object({ order: Type.String() }),
-			execute: async (args) => ({ content: [{ type: "text", text: `Order ${args.order} shipped.` }] }),
+			execute: async (args) => ({ output: [{ type: "text", text: `Order ${args.order} shipped.` }] }),
 		});
 		const plugin = definePlugin({
 			name: "orders",
@@ -133,7 +133,7 @@ describe("plugin replies while busy", () => {
 			execute: async () => {
 				toolStarted = true;
 				await gate;
-				return { content: [{ type: "text", text: "looked up" }] };
+				return { output: [{ type: "text", text: "looked up" }] };
 			},
 		});
 		const plugin = definePlugin({
@@ -318,13 +318,13 @@ describe("model and tool hooks", () => {
 			name: "read_secret",
 			description: "Reads a secret.",
 			parameters: Type.Object({}),
-			execute: async () => ({ content: [{ type: "text", text: "s3cr3t" }] }),
+			execute: async () => ({ output: [{ type: "text", text: "s3cr3t" }] }),
 		});
 		const echo = defineTool({
 			name: "echo",
 			description: "Echoes.",
 			parameters: Type.Object({ text: Type.String() }),
-			execute: async (args) => ({ content: [{ type: "text", text: `token=abc ${args.text}` }] }),
+			execute: async (args) => ({ output: [{ type: "text", text: `token=abc ${args.text}` }] }),
 		});
 		const policy = definePlugin({
 			name: "policy",
@@ -342,7 +342,7 @@ describe("model and tool hooks", () => {
 			beforeToolCall: (call) => (call.name === "read_secret" ? { block: "Not allowed." } : undefined),
 			afterToolCall: (_call, result) => ({
 				...result,
-				content: result.content?.map((block) => (block.type === "text" ? { ...block, text: block.text.replace(/token=\S+/, "token=***") } : block)),
+				output: result.output?.map((block) => (block.type === "text" ? { ...block, text: block.text.replace(/token=\S+/, "token=***") } : block)),
 			}),
 		});
 		running = await startTestAgent({

@@ -21,10 +21,10 @@ export const guardrails = definePlugin({
 		return { input };
 	},
 	afterToolCall: (_call, result): ToolExecutionResult | undefined => {
-		if (result.content === undefined) return undefined;
+		if (result.output === undefined) return undefined;
 		return {
 			...result,
-			content: result.content.map((block) => (block.type === "text" ? { ...block, text: redact(block.text) } : block)),
+			output: result.output.map((block) => (block.type === "text" ? { ...block, text: redact(block.text) } : block)),
 		};
 	},
 });

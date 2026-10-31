@@ -268,7 +268,7 @@ append, so the earlier prefix of the request stays the same and the cache still 
 the next model request, including mid-run: the model that calls `load_skill` can call the new tools in its next
 response.
 
-Mapping onto pi-durable 1.0.2: every MCP server is one extension (`mcp.<server>`) holding all of its tools; a server
+Mapping onto pi-durable 1.4.0: every MCP server is one extension (`mcp.<server>`) holding all of its tools; a server
 refresh re-installs that extension in place. The meta-tools live in the `agent.core` extension. A conversation's
 `pi.agent.tools` is a name array, the exact set offered. Activation edits that array and an `app.tools` document
 (activation order, for eviction) in one commit from the tool's `api.commit()`.

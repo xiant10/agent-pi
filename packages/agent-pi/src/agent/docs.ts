@@ -20,6 +20,7 @@ export const SessionDoc = defineDoc<SessionState>({
 	history: "latest",
 	fork: "initial",
 	initial: () => ({ owner: "", userId: "", profile: "", createdAt: 0 }),
+	checkpointWhen: () => false,
 });
 
 /** Anything that reads documents: the harness, a transaction's reader, a tool or hook API. */
@@ -44,6 +45,7 @@ export const UserSessionsDoc = defineDocFamily<{ sessions: number[] } & JsonObje
 	family: true,
 	scope: "session",
 	initial: () => ({ sessions: [] }),
+	checkpointWhen: () => false,
 });
 
 /**
@@ -57,6 +59,7 @@ export const ToolStateDoc = defineDoc<{ dynamic: string[]; skills?: Record<strin
 	history: "latest",
 	fork: "current",
 	initial: () => ({ dynamic: [] }),
+	checkpointWhen: () => false,
 });
 
 /** Process identity, persisted so session ids stay valid across restarts of the same storage. */
@@ -65,4 +68,5 @@ export const InstanceDoc = defineDoc<{ id: string } & JsonObject>({
 	version: 1,
 	scope: "session",
 	initial: () => ({ id: "" }),
+	checkpointWhen: () => false,
 });

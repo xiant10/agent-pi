@@ -39,10 +39,10 @@ function mcpTool(entry: CatalogEntry, manager: McpManager, credentials: Credenti
 			try {
 				const result = await manager.callTool(entry, args, credentials.get(api.conversationId), context.abortSignal);
 				// MCP reports tool failures in the result, not as protocol errors.
-				return { content: toLlmContent(result), isError: result.isError === true };
+				return { output: toLlmContent(result), isError: result.isError === true };
 			} catch (error) {
 				if (context.abortSignal?.aborted) throw error;
-				return { content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }], isError: true };
+				return { output: [{ type: "text", text: error instanceof Error ? error.message : String(error) }], isError: true };
 			}
 		},
 	});
