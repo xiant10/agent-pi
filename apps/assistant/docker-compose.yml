@@ -2,15 +2,15 @@ services:
   agent:
     build:
       context: ../..
-      dockerfile: apps/assistant/Dockerfile
     image: assistant:latest
     restart: unless-stopped
     env_file:
       - path: ../../.env
         required: false
     environment:
+      AGENT_CONFIG: /app/apps/assistant/config/agent.json
       PORT: ${PORT:-9800}
-      # Give each replica its own id and volume; session ids are prefixed with it (see docs/design.md, R5).
+      # Give each replica its own id and volume; session ids are <agent>.<this id>.<n> (see docs/design.md, R5).
       AGENT_INSTANCE_ID: ${AGENT_INSTANCE_ID:-agent-1}
     ports:
       - "${PORT:-9800}:${PORT:-9800}"

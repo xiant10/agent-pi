@@ -165,6 +165,7 @@ describe("loadConfig", () => {
 		writeFileSync(join(dir, "base.md"), "Be brief.");
 		process.env.TEST_GATEWAY = "http://gateway:7200/v1";
 		const base = {
+			agent: "test",
 			auth: { kind: "static", tokens: "{}" },
 			models: { fast: { provider: "openai-compatible", modelId: "m", baseUrl: "${TEST_GATEWAY}", identityHeaders: "gateway" } },
 			profiles: { voice: { model: "fast", speech: "true", maxActiveTools: "24" } },
@@ -178,7 +179,7 @@ describe("loadConfig", () => {
 		expect(config.models.fast).toMatchObject({ identityHeaders: { sessionId: "X-Session-ID", turnId: "X-Turn-ID", userName: "X-User-Name" } });
 		expect(config.profiles.voice).toMatchObject({ speech: true, maxActiveTools: 24 });
 		expect(config.instructions[0]?.content).toBe("Be brief.");
-		expect(config.storage).toEqual({ kind: "sqlite", path: join(dir, "agent.sqlite") });
+		expect(config.storage).toEqual({ kind: "sqlite", path: join(dir, "test.sqlite") });
 
 		writeFileSync(join(dir, "bad.json"), JSON.stringify({ ...base, profiles: { voice: { model: "nope" } } }));
 		expect(() => loadConfig(join(dir, "bad.json"))).toThrow(/unknown model "nope"/);

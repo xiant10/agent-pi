@@ -1,4 +1,4 @@
-import { definePlugin } from "agent-pi";
+import { definePlugin } from "../types.ts";
 
 /**
  * Tells the model the current date and time in the business's time zone. Added to each model request only, just before

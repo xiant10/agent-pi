@@ -1,4 +1,4 @@
-import { definePlugin } from "agent-pi";
+import { definePlugin } from "../types.ts";
 
 /**
  * One log line per settled run: who asked, what answered it (the model or a plugin), and how it ended. Replace the log

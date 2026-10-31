@@ -14,6 +14,7 @@ import {
 	type ToolRegistration,
 } from "@earendil-works/pi-durable";
 import type { CredentialStore } from "../auth/credentials.ts";
+import type { GrantBroker } from "../auth/grants.ts";
 import type { IdentityRegistry } from "../identity.ts";
 import { readSkillFile, renderSkillIndex, type Skill } from "../skills/skills.ts";
 import { activateSkill, activateTools } from "../tools/activation.ts";
@@ -35,6 +36,7 @@ export type CoreDeps = {
 	readonly profileOf: (name: string | undefined) => Profile;
 	readonly catalog: ToolCatalog;
 	readonly credentials: CredentialStore;
+	readonly grants?: GrantBroker;
 	readonly identity: IdentityRegistry;
 };
 
@@ -188,6 +190,7 @@ function expertTool(deps: CoreDeps): ToolRegistration {
 			deps.identity.adopt(child, api.conversationId);
 			let settled: Awaited<ReturnType<Submission["wait"]>>;
 			try {
+				await deps.grants?.spawn(child, api.conversationId);
 				await api.details({ conversationId: child }, context);
 				const handle = await api.conversation(child, context);
 				if (handle === undefined) throw new Error("expert conversation vanished");
@@ -199,6 +202,7 @@ function expertTool(deps: CoreDeps): ToolRegistration {
 			} finally {
 				deps.credentials.delete(child);
 				deps.identity.release(child);
+				await deps.grants?.release(child);
 			}
 			if (settled.status !== "done" || settled.type !== "input") {
 				return { isError: true, output: [{ type: "text", text: `The expert could not answer (${settled.reason ?? settled.status}).` }] };

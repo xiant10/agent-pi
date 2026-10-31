@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { definePlugin } from "agent-pi";
+import { definePlugin } from "../types.ts";
 
 export type Faq = { readonly patterns: readonly string[]; readonly answer: string };
 

@@ -1,4 +1,5 @@
-import { definePlugin, type ToolExecutionResult, type UserInput } from "agent-pi";
+import type { ToolExecutionResult, UserInput } from "@earendil-works/pi-durable";
+import { definePlugin } from "../types.ts";
 
 /** 13 to 19 digits, optionally grouped by spaces or dashes: a payment card number. */
 const CARD = /\b(?:\d[ -]?){12,18}\d\b/;

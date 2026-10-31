@@ -1,4 +1,7 @@
-# Build from the repository root (the workspace): docker build -f apps/assistant/Dockerfile .
+# The shared runtime: every agent's config, prompts, skills, and content in one image. AGENT_CONFIG picks which one a
+# container runs, one agent per process, so deploying another agent is another container of this image.
+#   docker build -t agent-pi .
+#   docker run -e AGENT_CONFIG=/app/apps/assistant/config/agent.json -v assistant-data:/data agent-pi
 # Runs the TypeScript sources directly: Node 24 strips types natively, so there is no build step.
 FROM node:24.21.0-bookworm-slim
 
@@ -7,22 +10,16 @@ ENV NODE_ENV=production
 
 COPY package.json package-lock.json .npmrc ./
 COPY packages/agent-pi/package.json packages/agent-pi/
-COPY apps/assistant/package.json apps/assistant/
+# Before the install: apps are workspaces, and an app with plugins of its own may have dependencies.
+COPY apps apps
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 
-# The harness package, then the app: its code, configuration, prompts, skills, and content.
 COPY packages/agent-pi/src packages/agent-pi/src
-COPY apps/assistant/src apps/assistant/src
-COPY apps/assistant/config apps/assistant/config
-COPY apps/assistant/prompts apps/assistant/prompts
-COPY apps/assistant/skills apps/assistant/skills
-COPY apps/assistant/content apps/assistant/content
 
-# SQLite storage lives on a volume so sessions and unfinished runs survive restarts.
+# SQLite storage lives on a volume so sessions and unfinished runs survive restarts. Give each agent its own volume.
 RUN mkdir -p /data && chown node:node /data
 VOLUME /data
-ENV AGENT_CONFIG=/app/apps/assistant/config/agent.json \
-    AGENT_DATA_DIR=/data \
+ENV AGENT_DATA_DIR=/data \
     PORT=9800
 
 USER node
@@ -33,4 +30,5 @@ HEALTHCHECK --interval=15s --timeout=3s --start-period=20s --retries=3 \
 
 # SIGTERM ends event streams, finishes commits, and closes storage; give it time before SIGKILL (compose: stop_grace_period).
 STOPSIGNAL SIGTERM
-CMD ["node", "--disable-warning=ExperimentalWarning", "apps/assistant/src/main.ts"]
+# An app with plugins of its own overrides this with its entry point.
+CMD ["node", "--disable-warning=ExperimentalWarning", "packages/agent-pi/src/main.ts"]

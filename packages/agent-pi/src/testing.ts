@@ -8,7 +8,7 @@ import { createInMemoryTransportPair } from "@earendil-works/pi-mcp/testing";
 import { type RunningAgent, type StartOptions, startAgent } from "./app.ts";
 import { StaticTokenAuthenticator } from "./auth/static-token.ts";
 import type { AppConfig, ProfileConfig } from "./config.ts";
-import type { AgentPlugin } from "./plugins/types.ts";
+import type { AgentPlugin, PluginCatalog } from "./plugins/types.ts";
 import type { Skill } from "./skills/skills.ts";
 import { SILENT_LOGGER } from "./util/log.ts";
 
@@ -76,6 +76,8 @@ const PROFILE: ProfileConfig = {
 
 export function testConfig(overrides: Partial<AppConfig> = {}): AppConfig {
 	return {
+		agent: "test",
+		baseDir: process.cwd(),
 		port: 0,
 		host: "127.0.0.1",
 		instanceId: "test",
@@ -88,6 +90,7 @@ export function testConfig(overrides: Partial<AppConfig> = {}): AppConfig {
 		},
 		defaultProfile: "chat",
 		instructions: [{ name: "base", content: "You are a helpful assistant.", tag: false }],
+		plugins: [],
 		mcpServers: [],
 		limits: { maxSessionsPerUser: 5, maxConcurrentRunsPerUser: 3, maxConcurrentRuns: 50, maxInputChars: 10_000, maxBodyBytes: 1_000_000 },
 		http: { path: "/agent", allowedOrigins: [], keepAliveMs: 15_000 },
@@ -124,7 +127,11 @@ export async function startTestAgent(options: {
 	/** Use this storage instead of a fresh MemoryStorage. */
 	readonly storage?: Storage;
 	readonly mcpTransport?: StartOptions["mcpTransport"];
+	readonly grantOptions?: StartOptions["grantOptions"];
+	/** Use this instead of the fixed tokens in `TOKENS`. */
+	readonly authenticator?: StartOptions["authenticator"];
 	readonly plugins?: readonly AgentPlugin[];
+	readonly pluginCatalog?: PluginCatalog;
 } = {}): Promise<TestAgent> {
 	const faux = fauxProvider(options.tokensPerSecond === undefined ? {} : { tokensPerSecond: options.tokensPerSecond });
 	const models = createModels();
@@ -133,20 +140,21 @@ export async function startTestAgent(options: {
 		...(options.mcp === undefined ? {} : { mcpServers: [{ name: "crm", transport: "stdio", command: "unused" }] }),
 		...options.config,
 	});
+	// Every configured model is the faux one, so an app can test with its real `config/agent.json`.
+	const modelNames = new Set(["main", "expert", ...Object.keys(config.models)]);
 	const agent = await startAgent(config, {
 		log: SILENT_LOGGER,
 		...(options.configStorage === true ? {} : { storage: options.storage ?? new MemoryStorage() }),
 		models: {
 			models,
-			refs: new Map([
-				["main", { provider: faux.provider.id, modelId: "faux-1" }],
-				["expert", { provider: faux.provider.id, modelId: "faux-1" }],
-			]),
+			refs: new Map([...modelNames].map((name) => [name, { provider: faux.provider.id, modelId: "faux-1" }])),
 		},
-		authenticator: new StaticTokenAuthenticator(new Map([[TOKENS.alice, "alice"], [TOKENS.bob, "bob"]])),
+		authenticator: options.authenticator ?? new StaticTokenAuthenticator(new Map([[TOKENS.alice, "alice"], [TOKENS.bob, "bob"]])),
 		...(options.mcp === undefined ? {} : { mcpTransport: options.mcp.transport }),
 		...(options.mcpTransport === undefined ? {} : { mcpTransport: options.mcpTransport }),
 		plugins: [...(options.skills === undefined ? [] : [{ name: "test-skills", skills: options.skills }]), ...(options.plugins ?? [])],
+		...(options.pluginCatalog === undefined ? {} : { pluginCatalog: options.pluginCatalog }),
+		...(options.grantOptions === undefined ? {} : { grantOptions: options.grantOptions }),
 	});
 	return { agent, faux, url: `http://127.0.0.1:${agent.port}/agent`, offered: [], close: () => agent.close() };
 }

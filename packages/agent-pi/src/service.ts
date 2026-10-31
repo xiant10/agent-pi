@@ -21,6 +21,7 @@ import { pinnedTools, preloadTools, type Profile } from "./agent/profiles.ts";
 import { parkedTasks } from "./agent/parked.ts";
 import { ownerKey, type Principal } from "./auth/authenticator.ts";
 import type { CredentialStore } from "./auth/credentials.ts";
+import { type GrantBroker, GrantError, type StoredGrant } from "./auth/grants.ts";
 import type { LimitsConfig } from "./config.ts";
 import { AppError, invalidParams, RPC, rateLimited } from "./errors.ts";
 import type { HubRegistry, SessionHub } from "./events/hub.ts";
@@ -44,6 +45,7 @@ export type ServiceDeps = {
 	readonly profiles: ReadonlyMap<string, Profile>;
 	readonly defaultProfile: Profile;
 	readonly credentials: CredentialStore;
+	readonly grants?: GrantBroker;
 	readonly hubs: HubRegistry;
 	readonly plugins: PluginRunner;
 	readonly limits: LimitsConfig;
@@ -152,6 +154,24 @@ export class AgentService {
 		};
 	}
 
+	/** Each user request opens or extends the session's grant. Only a change needs writing down. */
+	async #attachGrant(conversationId: ConversationId, session: Readonly<SessionState>, principal: Principal, context: Context): Promise<void> {
+		const grants = this.#deps.grants;
+		if (grants === undefined) return;
+		const stored =
+			session.grantId === undefined
+				? undefined
+				: { grantId: session.grantId, ...(session.grantParent === undefined ? {} : { parent: session.grantParent }) };
+		let grant: StoredGrant;
+		try {
+			grant = await grants.attach(conversationId, stored, principal);
+		} catch (error) {
+			if (error instanceof GrantError && error.reason === "stopped") throw new AppError("grant_refused", 403, RPC.forbidden, error.message);
+			throw new AppError("auth_unavailable", 503, RPC.internal, error instanceof Error ? error.message : String(error));
+		}
+		if (grant.grantId !== stored?.grantId) await this.#deps.store.setGrant(conversationId, grant, context);
+	}
+
 	/** Admit user input. An idle session starts a run; a busy one queues it as `whenBusy` says. */
 	async prompt(
 		principal: Principal,
@@ -164,6 +184,7 @@ export class AgentService {
 		const { conversation, session } = await this.#deps.store.require(principal, sessionId, context);
 		const profile = this.#profile(session.profile);
 		this.#deps.credentials.set(conversation.id, principal);
+		await this.#attachGrant(conversation.id, session, principal, context);
 		const lease = this.#runs.reserve(ownerKey(principal), conversation.id, this.#deps.limits);
 		try {
 			const admitted = await this.#admit(conversation, session, principal, profile, sessionId, content, options, context);
@@ -356,6 +377,7 @@ export class AgentService {
 		await this.#deps.plugins.sessionClosed(conversation.id, session, context);
 		await this.#deps.hubs.stop(conversation.id);
 		this.#deps.credentials.delete(conversation.id);
+		await this.#deps.grants?.close(conversation.id);
 		this.#deps.log.info("session.closed", { sessionId, owner: ownerKey(principal) });
 	}
 

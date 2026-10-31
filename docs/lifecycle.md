@@ -4,7 +4,7 @@ This document follows one agent from process start to shutdown and marks where a
 signatures are in `packages/agent-pi/src/plugins/types.ts`; the machinery is in `plugins/runner.ts`, `app.ts` and
 `service.ts`.
 
-Plugins run **in the order given** (`apps/assistant/src/plugins/index.ts`); each hook sees the effect of the earlier
+Plugins run **in the order given** (`plugins` in `apps/assistant/config/agent.json`); each hook sees the effect of the earlier
 plugins. Hooks are marked 🔌 in the diagrams.
 
 ## 1. Whole-system overview
@@ -52,14 +52,14 @@ A plugin is a plain object made with `definePlugin()`. Registering one means put
 app hands to `runAgent`. Nothing is discovered automatically.
 
 ```ts
-// apps/assistant/src/plugins/index.ts: the array order is the call order of every hook
-export const plugins: readonly AgentPlugin[] = [guardrails, shortcuts({ ... }), clock({ ... }), audit];
+// apps/assistant/config/agent.json: the array order is the call order of every hook
+"plugins": [{ "use": "guardrails" }, { "use": "shortcuts", ... }, { "use": "clock", ... }, { "use": "audit" }]
 
-// apps/assistant/src/main.ts
-await runAgent({ config: new URL("../config/agent.json", import.meta.url), plugins });
+// packages/agent-pi/src/main.ts: the shared runtime, for the agent AGENT_CONFIG names
+await runAgent({ pluginCatalog: builtinPlugins });
 ```
 
-`runAgent` → `startAgent(config, { plugins })` → `new PluginRunner(plugins, CORE_METHODS)`.
+`runAgent` → `startAgent(config, { pluginCatalog })` → `new PluginRunner(selected plugins, CORE_METHODS)`.
 
 ```mermaid
 flowchart TD
@@ -310,7 +310,7 @@ sequenceDiagram
 
 ## 10. The bundled assistant app
 
-`apps/assistant/src/plugins/index.ts` registers four plugins in this order:
+`apps/assistant/config/agent.json` selects four plugins in this order:
 
 | Plugin | Hooks used | What it does at that stage |
 |---|---|---|

@@ -1,7 +1,8 @@
 import { mkdirSync } from "node:fs";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import {
 	createRegistry,
@@ -17,8 +18,10 @@ import { coreExtension, instructionsExtension } from "./agent/core-extension.ts"
 import { createConfiguredModels } from "./agent/models.ts";
 import type { Profile } from "./agent/profiles.ts";
 import { parkedTasks } from "./agent/parked.ts";
+import { readSession } from "./agent/docs.ts";
 import type { Authenticator } from "./auth/authenticator.ts";
 import { CredentialStore } from "./auth/credentials.ts";
+import { GrantBroker, type GrantBrokerOptions } from "./auth/grants.ts";
 import { JwtAuthenticator } from "./auth/jwt.ts";
 import { StaticTokenAuthenticator } from "./auth/static-token.ts";
 import type { AppConfig } from "./config.ts";
@@ -28,9 +31,9 @@ import { Container } from "./plugins/container.ts";
 import { IdentityRegistry, identityExtension } from "./identity.ts";
 import { PluginRunner } from "./plugins/runner.ts";
 import { type ConfiguredModels, type McpTransportFactory, Services } from "./plugins/services.ts";
-import type { AgentPlugin } from "./plugins/types.ts";
+import type { AgentPlugin, PluginCatalog } from "./plugins/types.ts";
 import { AgentService } from "./service.ts";
-import { resolveInstanceId, SessionStore } from "./sessions.ts";
+import { resolveInstance, SessionStore } from "./sessions.ts";
 import { discoverSkills, type Skill } from "./skills/skills.ts";
 import { ToolCatalog } from "./tools/catalog.ts";
 import { mcpExtension, mcpExtensionName } from "./tools/mcp-extension.ts";
@@ -42,8 +45,10 @@ import { createLogger, type Logger } from "./util/log.ts";
 const CREDENTIAL_IDLE_MS = 30 * 60_000;
 
 export type StartOptions = {
-	/** Business logic, in order. See `AgentPlugin`. */
+	/** Business logic, in order, after the plugins the config selects. See `AgentPlugin`. */
 	readonly plugins?: readonly AgentPlugin[];
+	/** The plugins a config's `plugins` can `use`. See `builtinPlugins` in `agent-pi/plugins`. */
+	readonly pluginCatalog?: PluginCatalog;
 	/**
 	 * Shorthands for binding core services before plugins register (tests, small hosts). A plugin's `register()` can
 	 * bind the same services through `Services` tokens.
@@ -55,9 +60,12 @@ export type StartOptions = {
 	readonly mcpTransport?: McpTransportFactory;
 	/** How long startup waits for MCP servers' first connection attempts. Default 10 s. */
 	readonly mcpStartupWaitMs?: number;
+	/** For tests. */
+	readonly grantOptions?: GrantBrokerOptions;
 };
 
 export type RunningAgent = {
+	readonly agent: string;
 	readonly port: number;
 	readonly server: Server;
 	readonly harness: Harness;
@@ -83,7 +91,7 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 	const context = BACKGROUND_CONTEXT;
 	const container = new Container();
 	bindDefaults(container, config, options);
-	const plugins = new PluginRunner(options.plugins ?? [], CORE_METHODS);
+	const plugins = new PluginRunner([...configuredPlugins(config, options.pluginCatalog), ...(options.plugins ?? [])], CORE_METHODS);
 	await plugins.register(container);
 
 	const log = await container.get(Services.log);
@@ -97,9 +105,17 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 	container.value(Services.catalog, catalog);
 	const credentials = new CredentialStore();
 	const mcpServers = [...config.mcpServers, ...plugins.mcpServers];
-	const pluginServers = new Set(plugins.plugins.map((plugin) => plugin.name));
+	const grants = config.grants === undefined ? undefined : new GrantBroker(config.grants, options.grantOptions);
 	for (const server of mcpServers) {
-		if (pluginServers.has(server.name)) throw new Error(`MCP server ${server.name} has the name of a plugin`);
+		if (server.transport === "http" && server.auth === "grant" && grants === undefined) {
+			throw new Error(`MCP server ${server.name} has auth: "grant", which needs a grants section`);
+		}
+	}
+	if (grants !== undefined && config.auth.kind !== "jwt") throw new Error("grants needs auth.kind jwt");
+	// Plugins with in-process tools are catalog servers themselves; a plugin without tools may name its MCP server after itself.
+	const pluginServers = new Set(plugins.toolEntries().keys());
+	for (const server of mcpServers) {
+		if (pluginServers.has(server.name)) throw new Error(`MCP server ${server.name} has the name of a plugin with tools`);
 	}
 	const mcp = new McpManager(mcpServers, { catalog, log, createTransport: await container.get(Services.mcpTransport) });
 
@@ -108,15 +124,15 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 	const registry = createRegistry();
 	registry.install(instructionsExtension(config.instructions));
 	for (const extension of plugins.extensions(profileOf, credentials)) registry.install(extension);
-	registry.install(coreExtension({ skills, profiles, defaultProfile, profileOf, catalog, credentials, identity }));
-	registry.install(identityExtension(identity, (id) => store.publicId(id), credentials));
+	registry.install(coreExtension({ skills, profiles, defaultProfile, profileOf, catalog, credentials, identity, ...(grants === undefined ? {} : { grants }) }));
+	registry.install(identityExtension(identity, config.agent, (id) => store.publicId(id), credentials));
 	// A server's tools enter the registry as one extension, replaced in place when the server re-lists its tools.
 	// Plugins' in-process tools are catalogued too, so skills and search find them, but their extension holds the code.
 	catalog.onChange((server) => {
 		if (pluginServers.has(server)) return;
 		const entries = catalog.entries(server);
 		if (entries.length === 0) registry.uninstall(defineExtension({ name: mcpExtensionName(server) }));
-		else registry.install(mcpExtension(server, entries, mcp, credentials));
+		else registry.install(mcpExtension(server, entries, mcp, grants));
 	});
 	for (const [plugin, entries] of plugins.toolEntries()) {
 		const conflicts = catalog.setServer(plugin, entries);
@@ -156,10 +172,19 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 	);
 	container.value(Services.harness, harness);
 
-	const instanceId = await resolveInstanceId(harness, config.instanceId, context);
-	const store = new SessionStore(harness, instanceId, config.limits.maxSessionsPerUser);
+	const instance = await resolveInstance(harness, config.agent, config.instanceId, context).catch(async (error: unknown) => {
+		await harness.close(context);
+		throw error;
+	});
+	const { instanceId } = instance;
+	const store = new SessionStore(harness, instance, config.limits.maxSessionsPerUser);
 	const hubs = new HubRegistry(harness, {}, log);
 	plugins.attach({ harness, credentials, profile: profileOf, publicId: (id) => store.publicId(id), log });
+	grants?.attachStore(async (id) => {
+		const session = await readSession(harness, id, BACKGROUND_CONTEXT);
+		if (session?.grantId === undefined) return undefined;
+		return { grantId: session.grantId, ...(session.grantParent === undefined ? {} : { parent: session.grantParent }) };
+	});
 	const service = new AgentService({
 		harness,
 		store,
@@ -168,6 +193,7 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 		profiles,
 		defaultProfile,
 		credentials,
+		...(grants === undefined ? {} : { grants }),
 		hubs,
 		plugins,
 		limits: config.limits,
@@ -193,7 +219,7 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 		allowedOrigins: config.http.allowedOrigins,
 		keepAliveMs: config.http.keepAliveMs,
 		maxBodyBytes: config.limits.maxBodyBytes,
-		readiness: () => ({ ready: !closing && !failed, detail: { instanceId, tools: catalog.size, mcp: mcp.status() } }),
+		readiness: () => ({ ready: !closing && !failed, detail: { agent: config.agent, instanceId, tools: catalog.size, mcp: mcp.status() } }),
 	});
 	// Tokens of sessions nobody has called for a while leave memory; a working session keeps its caller's token.
 	const credentialSweep = setInterval(() => credentials.sweep(CREDENTIAL_IDLE_MS, (id) => service.isWorking(id)), 60_000);
@@ -210,6 +236,7 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 	});
 
 	return {
+		agent: config.agent,
 		port,
 		server,
 		harness,
@@ -236,9 +263,24 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 	};
 }
 
+/** The plugins the config selects, built from the catalog. An unknown name or a bad option stops startup. */
+function configuredPlugins(config: AppConfig, catalog: PluginCatalog = {}): AgentPlugin[] {
+	return config.plugins.map(({ use, options }, index) => {
+		const factory = Object.hasOwn(catalog, use) ? catalog[use] : undefined;
+		if (factory === undefined) {
+			throw new Error(`plugins[${index}]: unknown plugin ${JSON.stringify(use)}; this runtime offers: ${Object.keys(catalog).join(", ") || "none"}`);
+		}
+		try {
+			return factory(options, { resolve: (path) => resolve(config.baseDir, path) });
+		} catch (error) {
+			throw new Error(`plugins[${index}] (${use}): ${error instanceof Error ? error.message : String(error)}`);
+		}
+	});
+}
+
 function bindDefaults(container: Container, config: AppConfig, options: StartOptions): void {
 	container.value(Services.config, config);
-	container.bind(Services.log, () => options.log ?? createLogger(config.logLevel));
+	container.bind(Services.log, () => options.log ?? createLogger(config.logLevel, undefined, { agent: config.agent }));
 	container.bind(Services.models, async (c) => options.models ?? createConfiguredModels(config.models, await c.get(Services.identity), await c.get(Services.identityHeaders)));
 	container.value(Services.identity, new IdentityRegistry());
 	container.value(Services.identityHeaders, undefined);
@@ -293,5 +335,27 @@ function configuredAuthenticator(config: AppConfig): Authenticator {
 async function openStorage(config: AppConfig): Promise<Storage> {
 	if (config.storage.kind === "memory") return new MemoryStorage();
 	mkdirSync(dirname(config.storage.path), { recursive: true });
-	return openNodeSqliteStorage(config.storage.path);
+	const release = lockStorage(config.storage.path);
+	const storage = await openNodeSqliteStorage(config.storage.path);
+	const close = storage.close.bind(storage);
+	storage.close = async (context) => {
+		await close(context);
+		release();
+	};
+	return storage;
+}
+
+/**
+ * Storage has one owner process, and a second one on the same file corrupts ids instead of failing. The owner holds an
+ * exclusive SQLite lock on a file beside it; the OS drops the lock when the process dies, so a crash leaves nothing stale.
+ */
+function lockStorage(path: string): () => void {
+	const lock = new DatabaseSync(`${path}.lock`);
+	try {
+		lock.exec("BEGIN EXCLUSIVE");
+	} catch (error) {
+		lock.close();
+		throw new Error(`storage ${path} is in use by another process: ${error instanceof Error ? error.message : String(error)}`);
+	}
+	return () => lock.close();
 }

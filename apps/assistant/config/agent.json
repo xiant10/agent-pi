@@ -1,4 +1,5 @@
 {
+	"agent": "assistant",
 	"port": "${PORT:-9800}",
 	"instanceId": "${AGENT_INSTANCE_ID:-}",
 	"logLevel": "${LOG_LEVEL:-info}",
@@ -63,6 +64,19 @@
 	},
 	"instructions": [{ "name": "base", "file": "../prompts/base.md", "tag": false }],
 	"skillsDir": "../skills",
+	"plugins": [
+		{ "use": "guardrails" },
+		{ "use": "shortcuts", "options": { "faqFile": "../content/faq.json", "assistantName": "Ava" } },
+		{ "use": "clock", "options": { "timeZone": "${BUSINESS_TIME_ZONE:-Asia/Shanghai}" } },
+		{ "use": "audit" }
+	],
+	"grants": {
+		"url": "${AUTH_URL:-}",
+		"clientId": "${AUTH_CLIENT_ID:-agent-pi}",
+		"clientSecret": "${AUTH_CLIENT_SECRET:-}",
+		"actions": "${GRANT_ACTIONS:-agent:use}",
+		"audiences": "${GRANT_AUDIENCES:-agent-pi}"
+	},
 	"mcpServers": [],
 	"limits": {
 		"maxSessionsPerUser": "${MAX_SESSIONS_PER_USER:-20}",

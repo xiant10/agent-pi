@@ -3,9 +3,8 @@ import type { Principal } from "./authenticator.ts";
 
 /**
  * The newest verified principal per conversation, in memory only: bearer tokens are never written to durable storage.
- * Tool calls of a run resumed after a restart find nothing until the user calls again, and forwarding MCP servers then
- * answer with a "reconnect" error result. `sweep()` drops expired tokens and those of sessions idle for a while, so
- * abandoned sessions do not keep tokens in memory.
+ * Plugins and audit headers read it. Tools never do, because their tokens come from the conversation's grant. `sweep()`
+ * drops expired tokens and those of sessions idle for a while, so abandoned sessions do not keep tokens in memory.
  */
 export class CredentialStore {
 	readonly #byConversation = new Map<ConversationId, { readonly principal: Principal; readonly seen: number }>();
@@ -14,7 +13,7 @@ export class CredentialStore {
 		this.#byConversation.set(conversationId, { principal, seen: Date.now() });
 	}
 
-	/** A child conversation, such as a consulted expert, calls tools as its parent's user. */
+	/** A child conversation, such as a consulted expert, belongs to its parent's user. */
 	inherit(child: ConversationId, parent: ConversationId): void {
 		const entry = this.#byConversation.get(parent);
 		if (entry !== undefined) this.#byConversation.set(child, { principal: entry.principal, seen: Date.now() });

@@ -63,11 +63,14 @@ export function startSpan(
  * Exports spans over OTLP/HTTP when `OTEL_EXPORTER_OTLP_ENDPOINT` names a collector (`http://host:4318`). Returns the
  * shutdown that flushes them, or `undefined` when tracing stays off.
  */
-export function setupTracing(env: Readonly<Record<string, string | undefined>> = process.env): (() => Promise<void>) | undefined {
+export function setupTracing(
+	env: Readonly<Record<string, string | undefined>> = process.env,
+	serviceName = "agent-pi",
+): (() => Promise<void>) | undefined {
 	const endpoint = env.OTEL_EXPORTER_OTLP_ENDPOINT;
 	if (endpoint === undefined || endpoint === "") return undefined;
 	const provider = new BasicTracerProvider({
-		resource: resourceFromAttributes({ "service.name": env.OTEL_SERVICE_NAME ?? "agent-pi" }),
+		resource: resourceFromAttributes({ "service.name": env.OTEL_SERVICE_NAME ?? serviceName }),
 		spanProcessors: [new BatchSpanProcessor(new OTLPTraceExporter({ url: `${endpoint.replace(/\/$/, "")}/v1/traces` }))],
 	});
 	trace.setGlobalTracerProvider(provider);

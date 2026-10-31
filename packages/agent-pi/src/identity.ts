@@ -22,6 +22,8 @@ import { startSpan } from "./util/tracing.ts";
  * turn (one user message and every model call it triggers, tool loops and retries included), and the user.
  */
 export type CallIdentity = {
+	/** The agent making the call. */
+	readonly agent?: string;
 	readonly sessionId: string;
 	readonly turnId?: string;
 	readonly userId?: string;
@@ -53,6 +55,7 @@ export type IdentityHeaderNames = { readonly [Field in keyof CallIdentity]?: str
 
 /** The header names of the Kaidan agent gateway's audit log. */
 export const GATEWAY_IDENTITY_HEADERS: IdentityHeaderNames = {
+	agent: "X-Agent-Name",
 	sessionId: "X-Session-ID",
 	turnId: "X-Turn-ID",
 	userId: "X-User-Id",
@@ -267,6 +270,7 @@ function headerValue(value: string): string {
  */
 export function identityExtension(
 	registry: IdentityRegistry,
+	agent: string,
 	publicId: (conversationId: ConversationId) => string,
 	credentials: CredentialStore,
 ): Extension {
@@ -283,6 +287,7 @@ export function identityExtension(
 					const principal = credentials.get(api.conversationId);
 					const turn = await currentTurnRecord(api, owner, context);
 					registry.set(provider.sessionId, {
+						agent,
 						sessionId: publicId(owner),
 						...(turn === undefined ? {} : { turnId: turn.turnId }),
 						...(turn?.traceparent === undefined ? {} : { traceparent: turn.traceparent }),

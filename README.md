@@ -22,17 +22,18 @@ Building a new agent on the package: [`docs/developer-guide.md`](docs/developer-
 ```
 packages/agent-pi/     the harness: protocol, auth, durable wiring, MCP, skills machinery, events, plugin system
   src/index.ts           public API: runAgent, startAgent, definePlugin, Services, Container, ...
+  src/main.ts            the shared runtime: runs the agent AGENT_CONFIG names, one agent per process
+  src/plugins/library/   agent-pi/plugins: ready-made guardrails, shortcuts (answers without the model), clock, audit
   src/testing.ts         agent-pi/testing: the real harness with a scripted model, for app tests
-apps/assistant/        one product on the harness: everything business-specific, and the entry point
-  src/main.ts            runAgent({ config, plugins })
-  src/plugins/           guardrails, shortcuts (answers without the model), clock, audit
-  config/agent.json      models, profiles (personas), instructions, skills dir, MCP servers, limits
+apps/assistant/        one agent on the runtime: configuration only, no code of its own
+  config/agent.json      agent name, models, profiles (personas), instructions, plugins, skills dir, MCP servers, limits
   prompts/ skills/ content/
   scripts/smoke.ts       smoke test against a real model gateway: npm run smoke
+Dockerfile             one image holding every agent; AGENT_CONFIG picks the agent a container runs
 ```
 
-A new product is another `apps/<name>` (or a separate repository) that depends on `agent-pi`, ships its own config,
-prompts, skills, and plugins, and calls `runAgent()`.
+A new agent is another `apps/<name>` with its own config, prompts, and skills. It runs on the shared runtime, or on its
+own entry point if it has plugins of its own (see the [developer guide](docs/developer-guide.md#create-an-app)).
 
 ## Quick start
 
@@ -145,7 +146,7 @@ The session is named by the `Agent-Session-Id` header or `params.sessionId`.
 
 A **turn** is one user message and every model call it triggers (tool loops, retries). Send `turnId` (param, or the `X-Turn-ID` header; 1-128 of `A-Za-z0-9._:-`) to name it; otherwise agent-pi generates one when the call arrives and returns it as `turnId`. A retried `requestId` keeps its first turn. Plugins see it as `turn.turnId`, `run.turnId`, and `ctx.turnId`.
 
-**Audit identity to the model gateway.** A model with `identityHeaders` sends who the call is for on every request: `"gateway"` means `X-Session-ID` (the public session id), `X-Turn-ID`, `X-User-Id`, and `X-User-Name` (the JWT `nameClaim`, default `name`; percent-encoded when not ASCII), as the agent gateway's audit log expects. Or name your own headers: `{ "sessionId": "X-Session", "turnId": "X-Turn", "userId": "X-User", "userName": "X-Name", "tenantId": "X-Tenant" }`. Only `openai-compatible` models support it.
+**Audit identity to the model gateway.** A model with `identityHeaders` sends who the call is for on every request: `"gateway"` means `X-Agent-Name` (the config's `agent`), `X-Session-ID` (the public session id), `X-Turn-ID`, `X-User-Id`, and `X-User-Name` (the JWT `nameClaim`, default `name`; percent-encoded when not ASCII), as the agent gateway's audit log expects. Or name your own headers: `{ "agent": "X-Agent", "sessionId": "X-Session", "turnId": "X-Turn", "userId": "X-User", "userName": "X-Name", "tenantId": "X-Tenant" }`. Only `openai-compatible` models support it.
 
 **Tracing.** Send a W3C `traceparent` header with a prompt and its work joins your trace: an `agent.submission` span, with an `agent.model` span per model request and an `agent.tool` span per tool call under it. Without one, the input starts a trace of its own. Set `OTEL_EXPORTER_OTLP_ENDPOINT` (a URL such as `http://collector:4318`; `OTEL_SERVICE_NAME` defaults to `agent-pi`) to export them over OTLP/HTTP. A model with `identityHeaders` also passes its `agent.model` span to the gateway as `traceparent`. `agent.model` spans cover `openai-compatible` models only.
 
@@ -206,7 +207,7 @@ If the connection drops mid-run, the run continues; reconnect with `GET /agent` 
 
 ## Configuration
 
-Each app owns its config file (`apps/assistant/config/agent.json`), with `${VAR}` and `${VAR:-default}` substituted from the environment (and `.env`). Relative paths resolve against the config file. `AGENT_CONFIG` replaces the app's default path.
+Each agent owns its config file (`apps/assistant/config/agent.json`), with `${VAR}` and `${VAR:-default}` substituted from the environment (and `.env`). Relative paths resolve against the config file. `AGENT_CONFIG` names the file; the shared runtime requires it. `agent` is the required name of the agent, and `plugins` lists what it runs, such as `{ "use": "clock", "options": { "timeZone": "UTC" } }`.
 
 - `auth`: `{ kind: "jwt", algorithms, jwksUrl | publicKeyFiles | hmacSecret, issuer, audience, requiredScopes, userClaim, nameClaim, tenantClaim, maxTokenAgeSec }` or `{ kind: "static", tokens: "{\"token\":\"user\"}" }`.
 - `models`: named models. `openai-compatible` models of one gateway share a `providerId`; `anthropic` and `openai` read their usual API key env vars.
@@ -224,12 +225,12 @@ Models and profiles can also come from code: bind `Services.models` or `Services
 
 ```json
 "mcpServers": [
-	{ "name": "crm", "transport": "http", "url": "http://crm-mcp:7002/mcp", "auth": "forward", "headers": { "x-api-key": "${CRM_SERVICE_KEY}" } },
+	{ "name": "crm", "transport": "http", "url": "http://crm-mcp:7002/mcp", "auth": "grant", "headers": { "x-api-key": "${CRM_SERVICE_KEY}" } },
 	{ "name": "search", "transport": "stdio", "command": "npx", "args": ["-y", "some-mcp-server"], "exclude": ["admin_*"] }
 ]
 ```
 
-Tools are offered as `<prefix><tool>` (default prefix `<name>_`; `"prefix": ""` for bare names). `auth: "forward"` calls the server with the caller's own bearer token over a per-user connection; `headers` are then used only to list tools. `include`/`exclude` filter tools by glob. Servers connect in the background with backoff and re-list on `tools/list_changed`; `/readyz` reports each server's state.
+Tools are offered as `<prefix><tool>` (default prefix `<name>_`; `"prefix": ""` for bare names). `auth: "grant"` calls the server with a short token minted from the conversation's agent grant, over a connection of that grant's own; `headers` are then used only to list tools, and the config needs a `grants` section. The user's token never reaches the server. `include`/`exclude` filter tools by glob. Servers connect in the background with backoff and re-list on `tools/list_changed`; `/readyz` reports each server's state.
 
 ### Skills
 
@@ -263,7 +264,7 @@ To replace the scheme entirely, bind `Services.authenticator` in `register()`.
 
 ## Scaling
 
-One process holds one SQLite storage. To scale out, run replicas with distinct `AGENT_INSTANCE_ID`s and their own volumes. Session ids are `<instanceId>.<n>`; a replica that receives another's id answers 421 with `Agent-Instance`, so route by the id prefix (sticky routing).
+One process runs one agent and holds one SQLite storage: a second process on the same file is refused at startup, as is a different agent. To scale out, run replicas with distinct `AGENT_INSTANCE_ID`s and their own volumes. Session ids are `<agent>.<replica>.<n>`; a process that receives another's id answers 421 with `Agent-Instance`, so route by everything before the last dot (sticky routing). Storage from before agents had names keeps accepting its old `<replica>.<n>` ids.
 
 ## Development
 

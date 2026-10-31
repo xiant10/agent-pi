@@ -10,11 +10,11 @@ export interface Logger {
 
 const RANK: Readonly<Record<Level, number>> = { debug: 10, info: 20, warn: 30, error: 40 };
 
-/** One JSON object per line on stdout, for container log collectors. */
-export function createLogger(minimum: Level = "info", write: (line: string) => void = console.log): Logger {
+/** One JSON object per line on stdout, for container log collectors. `base` fields go on every line. */
+export function createLogger(minimum: Level = "info", write: (line: string) => void = console.log, base?: Fields): Logger {
 	const emit = (level: Level, event: string, fields?: Fields) => {
 		if (RANK[level] < RANK[minimum]) return;
-		write(JSON.stringify({ time: new Date().toISOString(), level, event, ...fields }));
+		write(JSON.stringify({ time: new Date().toISOString(), level, event, ...base, ...fields }));
 	};
 	return {
 		debug: (event, fields) => emit("debug", event, fields),

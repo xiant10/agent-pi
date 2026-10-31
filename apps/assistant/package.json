@@ -8,7 +8,7 @@
 		"node": ">=24.21.0"
 	},
 	"scripts": {
-		"start": "node --disable-warning=ExperimentalWarning src/main.ts",
+		"start": "AGENT_CONFIG=config/agent.json node --disable-warning=ExperimentalWarning ../../packages/agent-pi/src/main.ts",
 		"test": "vitest --run",
 		"smoke": "node --disable-warning=ExperimentalWarning scripts/smoke.ts"
 	},

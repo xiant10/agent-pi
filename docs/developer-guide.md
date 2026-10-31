@@ -32,16 +32,16 @@ skills, tools, and plugins, and how to test and ship it. For why the harness wor
 
 The harness contains no prompt text, persona, model choice, or integration. If you find yourself wanting to edit
 `packages/agent-pi` for one product, look for a plugin hook first; if none fits, the hook is what the harness should
-gain.
+gain. A plugin that more than one app needs belongs in [`agent-pi/plugins`](#ready-made-plugins), which apps opt into.
 
 ## Create an app
 
-The `assistant` app is the reference. A minimal app is four files:
+Agents share one runtime: each agent is a folder of configuration, and each runs as its own process. The `assistant`
+app is the reference. A minimal agent is three files, and no code:
 
 ```
 apps/my-agent/
   package.json
-  src/main.ts
   config/agent.json
   prompts/base.md
 ```
@@ -55,31 +55,20 @@ apps/my-agent/
 	"type": "module",
 	"engines": { "node": ">=24.21.0" },
 	"scripts": {
-		"start": "node --disable-warning=ExperimentalWarning src/main.ts",
+		"start": "AGENT_CONFIG=config/agent.json node --disable-warning=ExperimentalWarning ../../packages/agent-pi/src/main.ts",
 		"test": "vitest --run"
 	},
 	"dependencies": { "agent-pi": "*" }
 }
 ```
 
-**`src/main.ts`**: `runAgent()` loads `.env` and the config, starts the server, and handles SIGTERM.
-
-```ts
-import { runAgent } from "agent-pi";
-import { plugins } from "./plugins/index.ts";
-
-await runAgent({ config: new URL("../config/agent.json", import.meta.url), plugins });
-```
-
-Use `startAgent(config, options)` instead when you embed the agent in another process or need the `RunningAgent`
-handle (its `close()`, `harness`, `catalog`, `container`).
-
 **`config/agent.json`**: the smallest useful configuration. Paths are relative to this file.
 
 ```json
 {
+	"agent": "my-agent",
 	"port": "${PORT:-9800}",
-	"storage": { "kind": "sqlite", "path": "${AGENT_DATA_DIR:-../data}/agent.sqlite" },
+	"storage": { "kind": "sqlite", "path": "${AGENT_DATA_DIR:-../data}/my-agent.sqlite" },
 	"auth": { "kind": "${AUTH_KIND:-jwt}", "tokens": "${AGENT_TOKENS:-}", "jwksUrl": "${JWT_JWKS_URL:-}", "algorithms": "RS256" },
 	"models": {
 		"main": {
@@ -90,7 +79,8 @@ handle (its `close()`, `harness`, `catalog`, `container`).
 		}
 	},
 	"profiles": { "chat": { "model": "main", "maxActiveTools": 32 } },
-	"instructions": [{ "name": "base", "file": "../prompts/base.md", "tag": false }]
+	"instructions": [{ "name": "base", "file": "../prompts/base.md", "tag": false }],
+	"plugins": [{ "use": "guardrails" }, { "use": "audit" }]
 }
 ```
 
@@ -110,21 +100,46 @@ curl -s localhost:9800/agent -H 'authorization: Bearer dev-token' -H 'content-ty
 
 Add the app to the root `tsconfig.json` `include` if it lives outside `apps/*`, so `npm run check` typechecks it.
 
+**Plugins of your own** need an entry point, because the shared runtime offers only `agent-pi/plugins`. Add
+`src/main.ts`, extend the catalog so your config can `use` them, and point `start` at it:
+
+```ts
+import { runAgent } from "agent-pi";
+import { builtinPlugins } from "agent-pi/plugins";
+import { orders } from "./plugins/orders.ts";
+
+await runAgent({
+	config: new URL("../config/agent.json", import.meta.url),
+	pluginCatalog: { ...builtinPlugins, orders: (options) => orders({ region: String(options.region) }) },
+});
+```
+
+`runAgent()` loads `.env` and the config, starts the server, and handles SIGTERM. It also takes `plugins`, a list in
+code that runs after the ones the config selects. If a plugin is useful to more than one agent, move it to
+[`agent-pi/plugins`](#ready-made-plugins) instead, and those agents need no entry point.
+
+Use `startAgent(config, options)` instead when you embed the agent in another process or need the `RunningAgent`
+handle (its `close()`, `harness`, `catalog`, `container`). Keep to one agent per process in production: agents in one
+process are isolated from each other's data, but a crash or storage failure takes all of them down.
+
 An app in its own repository depends on a published `agent-pi`. Node does not strip types under `node_modules`, so
 publishing needs a `tsc` step that emits `.js` first (see the README).
 
 ## Configuration
 
 `loadConfig()` reads JSON, substitutes `${VAR}` and `${VAR:-default}` in every string (an unset variable without a
-default is a startup error), and validates each field, failing with the field's path. Numbers and booleans may arrive
+default is a startup error; a variable set to an empty string stays empty, unlike in a shell), and validates each
+field, failing with the field's path. Numbers and booleans may arrive
 as strings from substitution; lists may be comma-separated strings. `AGENT_CONFIG` replaces the config path, and
 `AGENT_ENV_FILE` (default `.env`) is loaded first; variables already set in the environment win over the file.
 
 | Key | Default | Notes |
 |---|---|---|
+| `agent` | required | Name of this agent, matching `[a-z][a-z0-9_-]*`: the start of session ids, and its name in logs, traces, and gateway headers. Treat it as permanent: storage belongs to one agent |
 | `port`, `host` | `9800`, `0.0.0.0` | |
-| `instanceId` | generated, stored | Prefix of session ids; set one per replica (see [Deploying](#deploying)) |
-| `storage` | `sqlite`, `agent.sqlite` | `{ "kind": "memory" }` for throwaway runs |
+| `instanceId` | generated, stored | This replica of the agent, in session ids `<agent>.<instanceId>.<n>`; set one per replica (see [Deploying](#deploying)). Changing it orphans the sessions issued under the old one |
+| `storage` | `sqlite`, `<agent>.sqlite` | Each agent needs its own file. `{ "kind": "memory" }` for throwaway runs |
+| `plugins` | `[]` | `{ use, options }` entries, run in order. `use` names a plugin of the runtime's catalog; an unknown name or bad option stops startup |
 | `auth` | required | `kind: "jwt"` (`algorithms`, `jwksUrl` or `publicKeyFiles` or `hmacSecret`, `issuer`, `audience`, `requiredScopes`, `userClaim`, `nameClaim`, `tenantClaim`, `clockToleranceSec`, `requireExp`, `maxTokenAgeSec`) or `kind: "static"` with `tokens` as a JSON map of token to user id (development only) |
 | `models.<name>` | at least one | `provider`: `anthropic`, `openai`, or `openai-compatible` (`baseUrl`, `apiKeyEnv`, `api`: `chat-completions` or `responses`, `reasoning`, `contextWindow`, `maxOutputTokens`, `providerId`). Models of one `providerId` must share `baseUrl`, `api`, and `apiKeyEnv` |
 | `profiles.<name>` | at least one | See [Prompts and profiles](#prompts-and-profiles) |
@@ -203,15 +218,17 @@ When it would exceed `maxActiveTools`, the least recently activated tools are ev
 - Tools are offered as `<prefix><tool>`, with `prefix` defaulting to `<name>_` (`crm_list_accounts`); `""` offers bare
   names. Names are sanitized to 64 characters of `[A-Za-z0-9_-]`.
 - `transport: "stdio"` takes `command`, `args`, `env`, `cwd` instead of `url` and `headers`.
-- `auth: "forward"` calls the server over a per-user connection carrying the caller's bearer token (in
-  `forwardHeader`, default `Authorization`). Tokens live in memory only; a run resumed after a restart, or a session
-  idle for 30 minutes, gets a "reconnect" tool error until the user calls again.
+- `auth: "grant"` calls the server over a per-grant connection carrying a token minted from the conversation's agent
+  grant (in `tokenHeader`, default `Authorization`). The user's token never reaches the server. Runs continue while
+  the user is offline, and resume after a restart from the grant ID stored on the session. It needs a `grants` section,
+  which needs `auth.kind: "jwt"`. A rotated token gets a new connection, and the old one closes once its last call ends.
 - A server that is down at startup is retried with backoff; its tools join the catalog when it connects, and
   `tools/list_changed` re-lists them. The server never blocks startup or other servers.
 
 **Tool patterns**, used by `alwaysOnTools`, skills, `include`/`exclude`, and `activateTools`, are `[server:]glob`:
 `crm:list_*` is every `list_` tool of server `crm`; `get_weather` is that tool on any server; `crm:*` is all of `crm`.
-A plugin's in-process tools are server `<plugin name>`.
+A plugin's in-process tools are server `<plugin name>`, so an MCP server may share its plugin's name only when that
+plugin has no in-process tools.
 
 ## Skills
 
@@ -248,8 +265,8 @@ Plugins can contribute skills in code with `skills: [parseSkill("inline", markdo
 
 ## Plugins
 
-A plugin is an object of optional members, made with `definePlugin()`. Plugins run in the order of the array passed
-to `runAgent`; each hook sees what earlier plugins did. Put input sanitizers first.
+A plugin is an object of optional members, made with `definePlugin()`. Plugins run in the order of the config's
+`plugins`, then any passed to `runAgent` in code; each hook sees what earlier plugins did. Put input sanitizers first.
 
 ```
 startup:   register(container) ─► services built ─► setup(host) ─► unfinished runs resume ─► listen
@@ -265,6 +282,30 @@ shutdown:  dispose (reverse order)
 
 The full member list is in the [README's plugin reference](../README.md#plugin-reference) and the doc comments of
 `AgentPlugin` (`packages/agent-pi/src/plugins/types.ts`). The recipes below cover the common jobs.
+
+### Ready-made plugins
+
+`agent-pi/plugins` holds plugins that are not tied to one agent. Nothing loads them unless a config lists them, and
+`options` take `${VAR}` like any config value. Paths in them are relative to the config file:
+
+```json
+"plugins": [
+	{ "use": "guardrails" },
+	{ "use": "shortcuts", "options": { "faqFile": "../content/faq.json", "assistantName": "Max" } },
+	{ "use": "clock", "options": { "timeZone": "${BUSINESS_TIME_ZONE:-Europe/Berlin}" } },
+	{ "use": "audit" }
+]
+```
+
+| Plugin | Options | Does |
+|---|---|---|
+| `guardrails` | | Removes card numbers from user input and tool results. List it first, so later plugins see redacted text |
+| `shortcuts` | `faqFile`, `assistantName` | Answers bare greetings (in English, naming `assistantName`) and FAQ matches without the model |
+| `clock` | `timeZone` | Adds the current time to each model request |
+| `audit` | | Logs one line per session and per settled run |
+
+To share a plugin between agents, add it under `packages/agent-pi/src/plugins/library/` and to `builtinPlugins` in that
+folder's `index.ts`. Config can only select plugins from this catalog; it cannot name a file to load.
 
 ### Persona and fixed instructions
 
@@ -517,7 +558,7 @@ protocol, the way clients use them:
 ```ts
 import { fauxAssistantMessage, fauxText, fakeMcpServer, rpc, rpcStream, startTestAgent, type TestAgent, TOKENS } from "agent-pi/testing";
 import { afterEach, expect, it } from "vitest";
-import { plugins } from "../src/plugins/index.ts";
+import { plugins } from "./my-plugins.ts";
 
 let running: TestAgent | undefined;
 afterEach(() => running?.close());
@@ -542,6 +583,9 @@ it("calls the CRM tool the model picks", async () => {
 
 - `startTestAgent({ plugins, config, skills, mcp, tokensPerSecond })`: `config` overrides `testConfig()`; `mcp` is
   served as server `crm`; `tokensPerSecond` slows the faux model to test streaming, steering, and barge-in.
+- To test the agent as it ships, pass your own config and the runtime's catalog. Every model in it becomes the faux
+  model, and storage and auth stay the test ones; set the port, or the test binds the configured one:
+  `startTestAgent({ pluginCatalog: builtinPlugins, config: { ...loadConfig(path), port: 0, host: "127.0.0.1" } })`.
 - `faux.setResponses([...])` scripts model responses in order; a function step receives the request context, which is
   how tests assert what the model saw (`context.messages`). `faux.state.callCount` counts model calls.
 - `rpcStream()` collects an SSE response; `events(messages)` extracts the event bodies; `waitFor(check)` polls.
@@ -562,11 +606,28 @@ plugin-specific checks.
 
 ## Deploying
 
-The assistant's `Dockerfile` and `docker-compose.yml` are the template. The image is built from the repository root
-(`docker build -f apps/my-agent/Dockerfile .`), copies the harness sources and the app's `src`, `config`, `prompts`,
-`skills`, and `content`, and runs `src/main.ts` as the unprivileged `node` user.
+One image holds every agent. The root `Dockerfile` copies the harness sources and all of `apps/`, and runs the shared
+runtime as the unprivileged `node` user. `AGENT_CONFIG` picks the agent, so deploying another agent is another
+container of the same image, with its own config path and volume:
 
-- **State**: the SQLite file lives on a volume (`AGENT_DATA_DIR=/data`). Losing it loses sessions.
+```yaml
+  my-agent:
+    build: { context: . }
+    environment:
+      AGENT_CONFIG: /app/apps/my-agent/config/agent.json
+      AGENT_INSTANCE_ID: replica-1
+    volumes:
+      - my-agent-data:/data
+```
+
+An agent with its own entry point overrides the image's command, such as
+`command: ["node", "--disable-warning=ExperimentalWarning", "apps/my-agent/src/main.ts"]`. Logs carry `agent`, and
+traces use it as `service.name` unless `OTEL_SERVICE_NAME` is set.
+
+- **State**: the SQLite file lives on a volume (`AGENT_DATA_DIR=/data`). Losing it loses sessions. A file has one owner:
+  a second process on it is refused at startup with `is in use by another process`, and another agent with
+  `storage belongs to agent`. The lock is `<file>.lock` beside it, needs a local filesystem, and is released if the
+  process dies, so a crash never blocks the restart.
 - **Probes**: `GET /healthz` (process up), `GET /readyz` (listening, not shutting down, durable has not failed; the
   detail lists MCP server states). Neither needs auth.
 - **Storage failure**: durable treats any storage error as fatal. `/readyz` turns 503 and `runAgent` drains and exits 1,
@@ -577,8 +638,9 @@ The assistant's `Dockerfile` and `docker-compose.yml` are the template. The imag
 - **Shutdown**: SIGTERM ends event streams (clients reconnect), finishes commits, and closes storage. Give it time
   (`stop_grace_period: 30s`); unfinished runs resume on the next start.
 - **Scaling**: storage has one owner process, so run N replicas each with its own volume and `AGENT_INSTANCE_ID`.
-  Session ids are `<instanceId>.<n>`; a replica receiving another's id answers 421 with an `Agent-Instance` header, so
-  a gateway routes by the id prefix.
+  Session ids are `<agent>.<replica>.<n>`; a process receiving another's id answers 421 with an `Agent-Instance` header,
+  so a gateway routes by everything before the last dot. Storage from before agents had names also accepts its old
+  `<replica>.<n>` ids, and answers with the new form.
 - **Auth**: use `AUTH_KIND=jwt` in production; static tokens are for development.
 - **Browsers**: set `ALLOWED_ORIGINS` to your web origins; requests with any other `Origin` are refused.
 
@@ -605,6 +667,7 @@ The [README](../README.md#protocol) has the full method and event tables. The be
 
 Before shipping a new agent:
 
+- [ ] `agent` is set and unique, and the agent has its own volume.
 - [ ] Secrets come from the environment; `config/agent.json` has only `${VAR}` references.
 - [ ] Prompt sections are stable within a session; per-turn context is in `beforeModelRequest`.
 - [ ] Skill descriptions say when to use the skill; tool patterns match real tool names (`npm test` with a fake server).

@@ -210,6 +210,7 @@ export class JwtAuthenticator implements Authenticator {
 			throw invalid("token has no tenant claim");
 		}
 		const name = claimAt(claims, this.#config.nameClaim ?? "name");
+		const runtime = claimAt(claims, "act.sub");
 		return {
 			userId,
 			...(typeof tenant === "string" ? { tenantId: tenant } : {}),
@@ -218,6 +219,7 @@ export class JwtAuthenticator implements Authenticator {
 			claims,
 			token,
 			...(typeof claims.exp === "number" ? { expiresAt: claims.exp * 1000 } : {}),
+			...(typeof runtime === "string" && typeof claims.grant === "string" ? { agent: { runtime, grantId: claims.grant } } : {}),
 		};
 	}
 

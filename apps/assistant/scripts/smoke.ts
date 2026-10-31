@@ -26,7 +26,8 @@ type Result = Record<string, unknown> | undefined;
 type RpcReply = { status: number; result: Result; error: unknown };
 type SseMessage = { method?: string; params?: Record<string, unknown>; result?: Result };
 
-const MAIN = fileURLToPath(new URL("../src/main.ts", import.meta.url));
+const MAIN = fileURLToPath(new URL("../../../packages/agent-pi/src/main.ts", import.meta.url));
+const CONFIG = fileURLToPath(new URL("../config/agent.json", import.meta.url));
 /** The repository root's `.env.eval`, wherever the script is started from. */
 const DEFAULT_ENV_FILE = fileURLToPath(new URL("../../../.env.eval", import.meta.url));
 const LONG = "Write a detailed 400-word story about a lighthouse keeper. Do not use any tools.";
@@ -104,6 +105,7 @@ async function startLocal(): Promise<{ url: string; token: string; stop: () => P
 	const child: ChildProcess = spawn(process.execPath, ["--disable-warning=ExperimentalWarning", MAIN], {
 		env: {
 			...process.env,
+			AGENT_CONFIG: CONFIG,
 			AGENT_ENV_FILE: process.env.SMOKE_ENV_FILE ?? DEFAULT_ENV_FILE,
 			PORT: String(port),
 			AGENT_INSTANCE_ID: "smoke",

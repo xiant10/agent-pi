@@ -312,21 +312,28 @@ the voice app can play a filler phrase on `tool.started` for `consult_expert`.
   by `requestId`) without running plugins or preloading again; a retried input that a plugin answered returns the
   same reply from `app.replies` without writing a second exchange. A retried `session.interrupt` does not abort again, so it
   cannot stop the run its first attempt started.
-- Credentials for MCP: servers with `auth: "forward"` receive the caller's bearer token. The latest verified
-  principal per session is kept in memory only (tokens are never written to storage), and dropped once it expires or
-  the session goes 30 minutes without a request while not working. A run with no live principal (resumed after a
-  restart, or after that eviction) gets a tool error asking the user to reconnect.
-- Horizontal scaling: durable storage has one owner process. Run N replicas, each with its own volume. Public
-  session ids are `<instanceId>.<conversationId>`; a replica receiving another instance's id answers 421 with an
-  `Agent-Instance` header, so the gateway can route by the id prefix (sticky routing).
+- Credentials for MCP: servers with `auth: "grant"` receive a short token minted from the conversation's agent grant,
+  never the caller's. `GrantBroker` opens or extends the grant on each user request, and stores only its ID on the
+  session, so a run continues with the user offline and resumes after a restart. A LiveKit caller's grant gets a child,
+  which can't extend past its parent. `consult_expert` gets its own child grant, ended when it answers. A tool error
+  tells the model when a grant has expired or was stopped. The latest verified principal per session is still kept in
+  memory, only for plugins and audit headers.
+- Several agents: one runtime and one image, with one process per agent config. A process is the unit of failure, so
+  an agent's crash or storage error stays its own. Plugins are selected by config from a catalog in code; a config
+  cannot name a file to load.
+- Horizontal scaling: durable storage has one owner process, enforced by an exclusive SQLite lock on `<file>.lock` that
+  the OS releases if the process dies. Storage also records its agent, and refuses to open as another. Run N replicas,
+  each with its own volume. Public session ids are `<agent>.<replica>.<conversationId>`; a process receiving another
+  instance's id answers 421 with an `Agent-Instance` header, so the gateway can route by everything before the last
+  dot (sticky routing). Storage created before agents had names also accepts its old `<replica>.<conversationId>` ids.
 - Long sessions: pi-durable compaction (settings `compaction`) summarizes older context in the background, so a
   long voice call does not grow prefill latency without bound.
 - Restart: runs left unfinished resume (`harness.resume()`); event streams restart with a `snapshot`.
 
 ## R4: Docker
 
-- The image is built from the repository root with `apps/<app>/Dockerfile`. It runs the app's `src/main.ts` (Node strips
-  types; no build step) as the unprivileged `node` user.
+- One image, built from the repository root's `Dockerfile`, holds every agent. It runs `packages/agent-pi/src/main.ts`
+  for the agent `AGENT_CONFIG` names (Node strips types; no build step) as the unprivileged `node` user.
 - `GET /healthz` (process up) and `GET /readyz` (listening, not shutting down, and durable has not failed; the detail lists each MCP server's
   state, but a server that is down does not make the replica unready, since its tools join when it connects) are
   unauthenticated.
@@ -351,7 +358,7 @@ Paths are under `packages/agent-pi/src/` unless noted.
 | Events and speech | `events/hub.ts`, `mapper.ts`, `speech.ts` |
 | Transport | `transport/http.ts`, `streamable-http.ts`, `sse.ts` |
 | Test helpers (`agent-pi/testing`) | `testing.ts` |
-| The assistant app | `apps/assistant/src/main.ts`, `src/plugins/`, `config/`, `prompts/`, `skills/`, `content/` |
+| The assistant app | `apps/assistant/config/`, `prompts/`, `skills/`, `content/`; its plugins are in `agent-pi/plugins` |
 
 ## Not yet built
 

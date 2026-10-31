@@ -11,6 +11,10 @@ export type SessionState = {
 	createdAt: number;
 	closed?: boolean;
 	metadata?: JsonObject;
+	/** The agent grant tool calls run under. Safe to store: an id is useless without this runtime's credentials. */
+	grantId?: string;
+	/** The caller's grant, when grantId is a child of it. */
+	grantParent?: string;
 } & JsonObject;
 
 export const SessionDoc = defineDoc<SessionState>({
@@ -63,7 +67,11 @@ export const ToolStateDoc = defineDoc<{ dynamic: string[]; skills?: Record<strin
 });
 
 /** Process identity, persisted so session ids stay valid across restarts of the same storage. */
-export const InstanceDoc = defineDoc<{ id: string } & JsonObject>({
+/**
+ * `id` is this replica's; `agent` is the agent that owns the storage, absent until a build that names agents opens it;
+ * `legacyId` is the prefix of session ids issued before then, which this storage keeps accepting.
+ */
+export const InstanceDoc = defineDoc<{ id: string; agent?: string; legacyId?: string } & JsonObject>({
 	kind: "app.instance",
 	version: 1,
 	scope: "session",

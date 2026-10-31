@@ -4,6 +4,7 @@ import { AgentDoc, type Conversation, type ConversationId, type Harness, type Js
 import { InstanceDoc, SessionDoc, type SessionState, ToolStateDoc, UserSessionsDoc } from "./agent/docs.ts";
 import type { Profile } from "./agent/profiles.ts";
 import { ownerKey, type Principal } from "./auth/authenticator.ts";
+import type { StoredGrant } from "./auth/grants.ts";
 import { AppError, RPC, rateLimited, sessionNotFound } from "./errors.ts";
 
 export type SessionInfo = {
@@ -13,28 +14,51 @@ export type SessionInfo = {
 	readonly metadata?: JsonObject;
 };
 
-/** Read and stored once at startup: the configured id, else the one this storage was first opened with. */
-export async function resolveInstanceId(harness: Harness, configured: string | undefined, context: Context): Promise<string> {
-	return harness.commit(async (tx) => {
+export type ResolvedInstance = {
+	/** `<agent>.<replica>`, unique across agents even when they configure the same replica id. */
+	readonly instanceId: string;
+	/** The prefix of session ids this storage issued before agents had names. */
+	readonly legacyId: string | undefined;
+};
+
+/**
+ * Read and stored once at startup: the configured replica id, else the one this storage was first opened with. A
+ * storage belongs to one agent, so opening it as another is refused.
+ */
+export async function resolveInstance(
+	harness: Harness,
+	agent: string,
+	configured: string | undefined,
+	context: Context,
+): Promise<ResolvedInstance> {
+	const resolved = await harness.commit(async (tx) => {
 		const instance = await tx.doc(InstanceDoc);
+		if (instance.agent !== undefined && instance.agent !== agent) return { owner: instance.agent };
+		if (instance.agent === undefined && instance.id !== "") instance.legacyId = instance.id;
+		instance.agent = agent;
 		if (configured !== undefined) instance.id = configured;
 		else if (instance.id === "") instance.id = randomBytes(4).toString("hex");
-		return instance.id;
+		return { instanceId: `${agent}.${instance.id}`, legacyId: instance.legacyId };
 	}, context);
+	if ("owner" in resolved) throw new Error(`storage belongs to agent ${resolved.owner}, not ${agent}`);
+	return resolved;
 }
 
 /**
- * Sessions are ownerless durable conversations tagged with their owner. Public ids are `<instanceId>.<conversationId>`:
- * storage belongs to one process, so with several replicas the prefix tells a gateway which replica holds a session.
+ * Sessions are ownerless durable conversations tagged with their owner. Public ids are `<agent>.<replica>.<conversationId>`:
+ * storage belongs to one process, so with several agents or replicas everything before the last dot tells a gateway
+ * which one holds a session.
  */
 export class SessionStore {
 	readonly #harness: Harness;
 	readonly instanceId: string;
+	readonly #legacyId: string | undefined;
 	readonly #maxPerUser: number;
 
-	constructor(harness: Harness, instanceId: string, maxPerUser: number) {
+	constructor(harness: Harness, instance: ResolvedInstance, maxPerUser: number) {
 		this.#harness = harness;
-		this.instanceId = instanceId;
+		this.instanceId = instance.instanceId;
+		this.#legacyId = instance.legacyId;
 		this.#maxPerUser = maxPerUser;
 	}
 
@@ -44,9 +68,9 @@ export class SessionStore {
 
 	/** The conversation id of a public session id; another instance's id answers 421 naming that instance. */
 	parseId(sessionId: string): ConversationId {
-		const match = /^([A-Za-z0-9_-]+)\.(\d+)$/.exec(sessionId);
+		const match = /^([A-Za-z0-9_.-]+)\.(\d+)$/.exec(sessionId);
 		if (match === null) throw sessionNotFound();
-		if (match[1] !== this.instanceId) {
+		if (match[1] !== this.instanceId && match[1] !== this.#legacyId) {
 			throw new AppError("misdirected", 421, RPC.misdirected, "session belongs to another instance", {
 				"agent-instance": match[1]!,
 			});
@@ -115,6 +139,16 @@ export class SessionStore {
 		const conversation = await this.#harness.conversation(conversationId, context);
 		if (conversation === undefined) throw sessionNotFound();
 		return { conversation, session };
+	}
+
+	/** Remember a conversation's grant, so a run resumed after a restart mints tokens without its user. */
+	async setGrant(conversationId: ConversationId, grant: StoredGrant, context: Context): Promise<void> {
+		await this.#harness.commit(async (tx) => {
+			const session = await tx.doc(SessionDoc, conversationId);
+			session.grantId = grant.grantId;
+			if (grant.parent === undefined) delete session.grantParent;
+			else session.grantParent = grant.parent;
+		}, context);
 	}
 
 	/** Mark closed and drop from the owner's index. The transcript stays in storage. */

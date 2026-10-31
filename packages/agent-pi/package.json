@@ -8,6 +8,7 @@
 	},
 	"exports": {
 		".": "./src/index.ts",
+		"./plugins": "./src/plugins/library/index.ts",
 		"./testing": "./src/testing.ts"
 	},
 	"files": [

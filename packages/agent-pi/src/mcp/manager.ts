@@ -6,7 +6,6 @@ import {
 	StdioTransport,
 	StreamableHttpTransport,
 } from "@earendil-works/pi-mcp";
-import { ownerKey, type Principal } from "../auth/authenticator.ts";
 import { type CatalogEntry, compilePattern, offeredName, type ToolCatalog } from "../tools/catalog.ts";
 import type { Logger } from "../util/log.ts";
 
@@ -27,14 +26,14 @@ export type McpServerConfig =
 	| (CommonServerConfig & {
 			readonly transport: "http";
 			readonly url: string;
-			/** Sent on every request; with `auth: "forward"`, used only for listing tools. */
+			/** Sent on every request; with `auth: "grant"`, used only for listing tools. */
 			readonly headers?: Readonly<Record<string, string>>;
 			/**
-			 * `static` (default): one shared connection with `headers`. `forward`: calls go over a per-user connection that
-			 * carries the caller's bearer token in `forwardHeader` (default `Authorization`).
+			 * `static` (default): one shared connection with `headers`. `grant`: calls go over a per-grant connection that
+			 * carries a token minted from the conversation's grant in `tokenHeader` (default `Authorization`).
 			 */
-			readonly auth?: "static" | "forward";
-			readonly forwardHeader?: string;
+			readonly auth?: "static" | "grant";
+			readonly tokenHeader?: string;
 	  })
 	| (CommonServerConfig & {
 			readonly transport: "stdio";
@@ -47,10 +46,10 @@ export type McpServerConfig =
 export type McpManagerOptions = {
 	readonly catalog: ToolCatalog;
 	readonly log: Logger;
-	/** Most per-user connections kept open. Default 256. */
-	readonly maxUserClients?: number;
-	/** Per-user connections idle this long are closed. Default 5 minutes. */
-	readonly userClientIdleMs?: number;
+	/** Most per-grant connections kept open. Default 256. */
+	readonly maxGrantClients?: number;
+	/** Per-grant connections idle this long are closed. Default 5 minutes. */
+	readonly grantClientIdleMs?: number;
 	/** For tests. */
 	readonly createTransport?: (config: McpServerConfig, headers: Readonly<Record<string, string>>) => McpTransport;
 };
@@ -75,7 +74,14 @@ type ServerState = {
 	settleFirstAttempt: () => void;
 };
 
-type UserClient = { client: Promise<McpClient>; token: string; lastUsed: number };
+/** One token's connection. A newer token retires it, and it closes once its last call returns. */
+type GrantClient = { client: Promise<McpClient>; token: string; lastUsed: number; calls: number; retired: boolean };
+
+/** Who a call runs for: the grant its connection is keyed by, and a current token for it. */
+export type McpCaller = {
+	readonly key: () => Promise<string | undefined>;
+	readonly token: () => Promise<string>;
+};
 
 const CLIENT_INFO = { name: "agent-pi", version: "0.1.0" };
 const MAX_BACKOFF_MS = 60_000;
@@ -91,9 +97,9 @@ export class McpManager {
 	readonly #catalog: ToolCatalog;
 	readonly #log: Logger;
 	readonly #servers = new Map<string, ServerState>();
-	readonly #userClients = new Map<string, UserClient>();
-	readonly #maxUserClients: number;
-	readonly #userClientIdleMs: number;
+	readonly #grantClients = new Map<string, GrantClient>();
+	readonly #maxGrantClients: number;
+	readonly #grantClientIdleMs: number;
 	readonly #createTransport: NonNullable<McpManagerOptions["createTransport"]>;
 	readonly #sweep: ReturnType<typeof setInterval>;
 	#closed = false;
@@ -101,8 +107,8 @@ export class McpManager {
 	constructor(configs: readonly McpServerConfig[], options: McpManagerOptions) {
 		this.#catalog = options.catalog;
 		this.#log = options.log;
-		this.#maxUserClients = options.maxUserClients ?? 256;
-		this.#userClientIdleMs = options.userClientIdleMs ?? 300_000;
+		this.#maxGrantClients = options.maxGrantClients ?? 256;
+		this.#grantClientIdleMs = options.grantClientIdleMs ?? 300_000;
 		this.#createTransport = options.createTransport ?? defaultTransport;
 		for (const config of configs) {
 			if (this.#servers.has(config.name)) throw new Error(`mcp: duplicate server name ${config.name}`);
@@ -124,7 +130,7 @@ export class McpManager {
 				settleFirstAttempt,
 			});
 		}
-		this.#sweep = setInterval(() => this.#sweepUserClients(), 30_000);
+		this.#sweep = setInterval(() => this.#sweepGrantClients(), 30_000);
 		this.#sweep.unref();
 	}
 
@@ -149,26 +155,28 @@ export class McpManager {
 		}));
 	}
 
-	/** Call `entry` for `principal`. Forwarding servers use the caller's own connection. */
+	/** Call `entry` for `caller`. Grant servers use a connection of that grant's own. */
 	async callTool(
 		entry: CatalogEntry,
 		args: Record<string, unknown>,
-		principal: Principal | undefined,
+		caller: McpCaller | undefined,
 		signal: AbortSignal | undefined,
 	): Promise<CallToolResult> {
 		const server = this.#servers.get(entry.server);
 		if (server === undefined) throw new McpUnavailableError(`MCP server ${entry.server} is not configured`);
 		const config = server.config;
 		const options = { timeoutMs: config.callTimeoutMs ?? 30_000, ...(signal === undefined ? {} : { signal }) };
-		if (config.transport === "http" && config.auth === "forward") {
-			if (principal === undefined) {
-				throw new McpUnavailableError("This tool needs the user's credentials; ask the user to reconnect.");
+		if (config.transport === "http" && config.auth === "grant") {
+			const key = await caller?.key();
+			if (caller === undefined || key === undefined) throw new McpUnavailableError("This tool needs an agent grant, and this run has none.");
+			const user = this.#grantClient(server, key, await caller.token());
+			user.calls++;
+			try {
+				return await (await user.client).callTool(entry.mcpName, args, options);
+			} finally {
+				user.calls--;
+				if (user.retired && user.calls === 0) this.#closeClient(user);
 			}
-			if (principal.expiresAt !== undefined && principal.expiresAt <= Date.now()) {
-				throw new McpUnavailableError("The user's credentials expired; ask the user to reconnect.");
-			}
-			const client = await this.#userClient(server, principal);
-			return client.callTool(entry.mcpName, args, options);
 		}
 		const client = server.client ?? (await this.#connect(server));
 		return client.callTool(entry.mcpName, args, options);
@@ -183,8 +191,8 @@ export class McpManager {
 			server.state = "closed";
 			if (server.client !== undefined) closing.push(server.client.close());
 		}
-		for (const user of this.#userClients.values()) closing.push(user.client.then((client) => client.close()));
-		this.#userClients.clear();
+		for (const user of this.#grantClients.values()) closing.push(user.client.then((client) => client.close()));
+		this.#grantClients.clear();
 		await Promise.allSettled(closing);
 	}
 
@@ -263,55 +271,66 @@ export class McpManager {
 		}
 	}
 
-	async #userClient(server: ServerState, principal: Principal): Promise<McpClient> {
+	/** The grant's connection for this token. Tokens last minutes, so rotation must not touch a call still running. */
+	#grantClient(server: ServerState, grantId: string, token: string): GrantClient {
 		const config = server.config as Extract<McpServerConfig, { transport: "http" }>;
-		const key = `${config.name}\0${ownerKey(principal)}`;
-		const existing = this.#userClients.get(key);
-		if (existing !== undefined && existing.token === principal.token) {
+		const key = `${config.name}\0${grantId}`;
+		const existing = this.#grantClients.get(key);
+		if (existing !== undefined && existing.token === token) {
 			existing.lastUsed = Date.now();
 			// LRU order: most recently used last.
-			this.#userClients.delete(key);
-			this.#userClients.set(key, existing);
-			return existing.client;
+			this.#grantClients.delete(key);
+			this.#grantClients.set(key, existing);
+			return existing;
 		}
 		if (existing !== undefined) {
-			this.#userClients.delete(key);
-			void existing.client.then((client) => client.close()).catch(() => undefined);
+			this.#grantClients.delete(key);
+			this.#retire(existing);
 		}
-		const header = config.forwardHeader ?? "Authorization";
+		const header = config.tokenHeader ?? "Authorization";
 		const headers = {
 			...config.headers,
-			[header]: header.toLowerCase() === "authorization" ? `Bearer ${principal.token}` : principal.token,
+			[header]: header.toLowerCase() === "authorization" ? `Bearer ${token}` : token,
 		};
 		const connecting = (async () => {
 			const client = new McpClient(CLIENT_INFO);
 			try {
 				await client.connect(this.#createTransport(config, headers));
 			} catch (error) {
-				this.#userClients.delete(key);
+				this.#grantClients.delete(key);
 				await client.close().catch(() => undefined);
 				throw new McpUnavailableError(`MCP server ${config.name} is unavailable: ${message(error)}`);
 			}
 			client.onClose(() => {
-				if (this.#userClients.get(key)?.client === connecting) this.#userClients.delete(key);
+				if (this.#grantClients.get(key)?.client === connecting) this.#grantClients.delete(key);
 			});
 			return client;
 		})();
-		this.#userClients.set(key, { client: connecting, token: principal.token, lastUsed: Date.now() });
-		while (this.#userClients.size > this.#maxUserClients) {
-			const [oldestKey, oldest] = this.#userClients.entries().next().value as [string, UserClient];
-			this.#userClients.delete(oldestKey);
-			void oldest.client.then((client) => client.close()).catch(() => undefined);
+		const created: GrantClient = { client: connecting, token, lastUsed: Date.now(), calls: 0, retired: false };
+		this.#grantClients.set(key, created);
+		while (this.#grantClients.size > this.#maxGrantClients) {
+			const [oldestKey, oldest] = this.#grantClients.entries().next().value as [string, GrantClient];
+			this.#grantClients.delete(oldestKey);
+			this.#retire(oldest);
 		}
-		return connecting;
+		return created;
 	}
 
-	#sweepUserClients(): void {
-		const cutoff = Date.now() - this.#userClientIdleMs;
-		for (const [key, user] of this.#userClients) {
-			if (user.lastUsed >= cutoff) continue;
-			this.#userClients.delete(key);
-			void user.client.then((client) => client.close()).catch(() => undefined);
+	#retire(user: GrantClient): void {
+		user.retired = true;
+		if (user.calls === 0) this.#closeClient(user);
+	}
+
+	#closeClient(user: GrantClient): void {
+		void user.client.then((client) => client.close()).catch(() => undefined);
+	}
+
+	#sweepGrantClients(): void {
+		const cutoff = Date.now() - this.#grantClientIdleMs;
+		for (const [key, user] of this.#grantClients) {
+			if (user.lastUsed >= cutoff || user.calls > 0) continue;
+			this.#grantClients.delete(key);
+			this.#retire(user);
 		}
 	}
 }

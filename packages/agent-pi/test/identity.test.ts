@@ -82,6 +82,7 @@ describe("identity headers", () => {
 
 		expect(seen).toHaveLength(2);
 		expect(seen[0]).toMatchObject({
+			"x-agent-name": "test",
 			"x-session-id": sessionId,
 			"x-turn-id": turnId,
 			"x-user-id": "alice",

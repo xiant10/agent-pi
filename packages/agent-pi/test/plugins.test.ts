@@ -7,7 +7,7 @@ import type { Authenticator } from "../src/auth/authenticator.ts";
 import { Container, token } from "../src/plugins/container.ts";
 import { Services } from "../src/plugins/services.ts";
 import { type AgentPlugin, definePlugin, type RunContext } from "../src/plugins/types.ts";
-import { events, recording, rpc, rpcStream, startTestAgent, type TestAgent, TOKENS, waitFor } from "../src/testing.ts";
+import { events, fakeMcpServer, recording, rpc, rpcStream, startTestAgent, type TestAgent, TOKENS, waitFor } from "../src/testing.ts";
 
 let running: TestAgent | undefined;
 afterEach(async () => {
@@ -426,9 +426,31 @@ describe("IoC and events", () => {
 		expect(events(messages).filter((body) => body.type === "speech").map((body) => body.text)).toEqual(["Welcome to Acme support."]);
 	});
 
+	it("calls the tools of an MCP server named after its plugin", async () => {
+		const mcp = fakeMcpServer([{ name: "get_account", description: "Get an account.", call: () => "Acme" }]);
+		const crm = definePlugin({
+			name: "crm",
+			mcpServers: [{ name: "crm", transport: "stdio", command: "unused" }],
+			beforePrompt: () => ({ activateTools: ["crm:*"] }),
+		});
+		running = await startTestAgent({ plugins: [crm], mcpTransport: mcp.transport });
+		running.faux.setResponses([
+			fauxAssistantMessage([fauxToolCall("crm_get_account", {})], { stopReason: "toolUse" }),
+			fauxAssistantMessage([fauxText("It is Acme.")]),
+		]);
+		const sessionId = await createSession(running);
+		const answer = await rpc(running.url, TOKENS.alice, "session.prompt", { sessionId, input: "Which account?" });
+		expect(answer.body.result).toMatchObject({ status: "done", text: "It is Acme." });
+		expect(mcp.calls).toEqual([{ name: "get_account", args: {} }]);
+	});
+
 	it("refuses duplicate plugins and plugin methods that shadow core ones", async () => {
 		await expect(startTestAgent({ plugins: [{ name: "a" }, { name: "a" }] })).rejects.toThrow(/two plugins named a/);
 		await expect(startTestAgent({ plugins: [{ name: "b", rpc: { "session.create": () => null } }] })).rejects.toThrow(/already defined/);
+		const tool = defineTool({ name: "ping", description: "Ping.", parameters: Type.Object({}), execute: async () => ({ output: [] }) });
+		await expect(
+			startTestAgent({ plugins: [{ name: "c", tools: [tool], mcpServers: [{ name: "c", transport: "stdio", command: "unused" }] }] }),
+		).rejects.toThrow(/has the name of a plugin with tools/);
 	});
 });
 

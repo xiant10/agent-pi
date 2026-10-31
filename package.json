@@ -10,7 +10,7 @@
 		"apps/*"
 	],
 	"scripts": {
-		"start": "node --disable-warning=ExperimentalWarning apps/assistant/src/main.ts",
+		"start": "AGENT_CONFIG=apps/assistant/config/agent.json node --disable-warning=ExperimentalWarning packages/agent-pi/src/main.ts",
 		"check": "tsc --noEmit",
 		"smoke": "node --disable-warning=ExperimentalWarning apps/assistant/scripts/smoke.ts",
 		"mock:compare": "bash scripts/mock/compare.sh",

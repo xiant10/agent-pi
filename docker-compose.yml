@@ -23,15 +23,15 @@ services:
     <<: *hardening
     build:
       context: .
-      dockerfile: apps/assistant/Dockerfile
     image: ${ASSISTANT_IMAGE:-assistant:latest}
     env_file:
       - path: .env
         required: false
     environment:
+      AGENT_CONFIG: /app/apps/assistant/config/agent.json
       PORT: "9800"
       AGENT_DATA_DIR: /data
-      # Give each replica its own id and volume; session ids are prefixed with it.
+      # Give each replica its own id and volume; session ids are <agent>.<this id>.<n>.
       AGENT_INSTANCE_ID: ${AGENT_INSTANCE_ID:-agent-1}
     ports:
       - "${ASSISTANT_PORT:-9800}:9800"

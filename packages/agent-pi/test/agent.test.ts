@@ -392,31 +392,6 @@ describe("expert, credentials, restart", () => {
 		expect(bodies.some((body) => body.type === "tool.started" && body.name === "consult_expert")).toBe(true);
 	});
 
-	it("forwards the caller's bearer token to MCP servers with auth: forward", async () => {
-		const mcp = fakeMcpServer([{ name: "whoami", description: "Who is calling." }]);
-		const seen: Record<string, string>[] = [];
-		running = await startTestAgent({
-			config: {
-				mcpServers: [{ name: "crm", transport: "http", url: "http://unused", headers: { "x-service": "agent" }, auth: "forward" }],
-				profiles: { chat: { model: "main", thinkingLevel: "off", alwaysOnTools: ["crm:whoami"], maxActiveTools: 12, preload: { maxTools: 0, minScore: 4 }, speech: false, thinkingEvents: false } },
-			},
-			mcpTransport: (_config, headers) => {
-				seen.push({ ...headers });
-				return mcp.transport();
-			},
-		});
-		running.faux.setResponses([
-			fauxAssistantMessage([fauxToolCall("crm_whoami", {})], { stopReason: "toolUse" }),
-			fauxAssistantMessage([fauxText("done")]),
-		]);
-		const sessionId = await createSession(running);
-		await rpc(running.url, TOKENS.alice, "session.prompt", { sessionId, input: "who am I" });
-		expect(mcp.calls).toEqual([{ name: "whoami", args: {} }]);
-		// Listing used the service headers; the call used a connection carrying alice's token.
-		expect(seen[0]).toEqual({ "x-service": "agent" });
-		expect(seen[1]).toEqual({ "x-service": "agent", Authorization: `Bearer ${TOKENS.alice}` });
-	});
-
 	it("keeps sessions and the instance id across a restart on SQLite", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "agent-restart-"));
 		const config = { storage: { kind: "sqlite" as const, path: join(dir, "agent.sqlite") }, instanceId: undefined };

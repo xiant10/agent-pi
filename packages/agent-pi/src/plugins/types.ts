@@ -215,3 +215,12 @@ export type PluginHost = {
 export function definePlugin(plugin: AgentPlugin): AgentPlugin {
 	return plugin;
 }
+
+/** Builds the plugin a config entry names, from its `options`. Throw to refuse bad options: startup fails with the entry's path. */
+export type PluginFactory = (
+	options: JsonObject,
+	context: { /** A path relative to the config file. */ resolve(path: string): string },
+) => AgentPlugin;
+
+/** The plugins a runtime offers, by the name configs `use`. It stays in code: a config chooses among these, never a file to load. */
+export type PluginCatalog = Readonly<Record<string, PluginFactory>>;

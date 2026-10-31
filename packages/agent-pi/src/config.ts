@@ -1,6 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
+import type { JsonObject } from "@earendil-works/pi-durable";
+import type { GrantsConfig } from "./auth/grants.ts";
 import type { JwtAlgorithm, JwtConfig } from "./auth/jwt.ts";
 import type { InstructionSection } from "./agent/core-extension.ts";
 import type { ModelConfig } from "./agent/models.ts";
@@ -31,17 +33,28 @@ export type LimitsConfig = {
 	readonly maxBodyBytes: number;
 };
 
+/** A plugin an agent runs: `use` names an entry of the `PluginCatalog` given at startup. */
+export type PluginRef = { readonly use: string; readonly options: JsonObject };
+
 export type AppConfig = {
+	/** Which agent this is: the first part of session ids, and its name in logs, traces, and gateway headers. */
+	readonly agent: string;
+	/** Where relative paths in plugin options start: the config file's directory. */
+	readonly baseDir: string;
 	readonly port: number;
 	readonly host: string;
-	/** Prefix of public session ids; persisted in storage when unset. */
+	/** This replica of the agent, unique within it; persisted in storage when unset. */
 	readonly instanceId?: string;
 	readonly storage: { readonly kind: "memory" } | { readonly kind: "sqlite"; readonly path: string };
 	readonly auth: AuthConfig;
+	/** The auth service, which turns callers into agent grants. Needed by `auth: "grant"` MCP servers. */
+	readonly grants?: GrantsConfig;
 	readonly models: Readonly<Record<string, ModelConfig>>;
 	readonly profiles: Readonly<Record<string, ProfileConfig>>;
 	readonly defaultProfile: string;
 	readonly instructions: readonly InstructionSection[];
+	/** Run before the plugins passed in code, in this order. */
+	readonly plugins: readonly PluginRef[];
 	readonly skillsDir?: string;
 	readonly mcpServers: readonly McpServerConfig[];
 	readonly limits: LimitsConfig;
@@ -57,6 +70,7 @@ export type AppConfig = {
 };
 
 const PLACEHOLDER = /\$\{([A-Za-z_][A-Za-z0-9_]*)(:-([^}]*))?\}/g;
+const AGENT_NAME = /^[a-z][a-z0-9_-]*$/;
 const SECTION_NAME = /^[a-z][a-z0-9_-]*$/;
 const RESERVED_SECTIONS = new Set(["instructions", "skills", "profile"]);
 const THINKING: readonly ModelThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
@@ -156,13 +170,29 @@ export function loadConfig(path: string): AppConfig {
 		}
 	};
 
+	const agent = r.string(raw.agent, "agent");
+	if (!AGENT_NAME.test(agent)) r.fail("agent", `must match ${AGENT_NAME}`);
+
 	const storageRaw = r.optionalObject(raw.storage, "storage");
 	const storageKind = r.oneOf(storageRaw.kind, "storage.kind", ["memory", "sqlite"] as const, "sqlite");
 	const storage =
 		storageKind === "memory"
 			? ({ kind: "memory" } as const)
-			: ({ kind: "sqlite", path: file(r.optionalString(storageRaw.path, "storage.path") ?? "agent.sqlite") } as const);
+			: ({ kind: "sqlite", path: file(r.optionalString(storageRaw.path, "storage.path") ?? `${agent}.sqlite`) } as const);
 
+	const grantsRaw = raw.grants === undefined ? undefined : r.object(raw.grants, "grants");
+	// An empty url turns grants off, so one config file can serve both modes from the environment.
+	const grantsUrl = grantsRaw === undefined ? undefined : r.optionalString(grantsRaw.url, "grants.url");
+	const grants: GrantsConfig | undefined =
+		grantsRaw === undefined || grantsUrl === undefined
+			? undefined
+			: {
+					url: grantsUrl,
+					clientId: r.string(grantsRaw.clientId, "grants.clientId"),
+					clientSecret: r.string(grantsRaw.clientSecret, "grants.clientSecret"),
+					actions: r.strings(grantsRaw.actions, "grants.actions"),
+					audiences: r.strings(grantsRaw.audiences, "grants.audiences"),
+				};
 	const authRaw = r.object(raw.auth, "auth");
 	const authKind = r.oneOf(authRaw.kind, "auth.kind", ["jwt", "static"] as const);
 	let auth: AuthConfig;
@@ -262,6 +292,11 @@ export function loadConfig(path: string): AppConfig {
 		parseMcpServer(r, value, `mcpServers[${index}]`),
 	);
 
+	const plugins = (Array.isArray(raw.plugins) ? raw.plugins : []).map((value, index) => {
+		const entry = r.object(value, `plugins[${index}]`);
+		return { use: r.string(entry.use, `plugins[${index}].use`), options: r.optionalObject(entry.options, `plugins[${index}].options`) as JsonObject };
+	});
+
 	const limits = r.optionalObject(raw.limits, "limits");
 	const http = r.optionalObject(raw.http, "http");
 	const durable = r.optionalObject(raw.durable, "durable");
@@ -284,15 +319,19 @@ export function loadConfig(path: string): AppConfig {
 	const baseDelayMs = r.optionalNumber(retry.baseDelayMs, "durable.retry.baseDelayMs");
 
 	return {
+		agent,
+		baseDir: dir,
 		port: r.number(raw.port, "port", 9800),
 		host: r.optionalString(raw.host, "host") ?? "0.0.0.0",
 		...(instanceId === undefined ? {} : { instanceId }),
+		...(grants === undefined ? {} : { grants }),
 		storage,
 		auth,
 		models,
 		profiles,
 		defaultProfile,
 		instructions,
+		plugins,
 		...(skillsDir === undefined ? {} : { skillsDir: file(skillsDir) }),
 		mcpServers,
 		limits: {
@@ -364,7 +403,7 @@ function parseIdentityHeaders(r: Reader, value: unknown, at: string): IdentityHe
 	return names;
 }
 
-const IDENTITY_FIELDS: readonly string[] = ["sessionId", "turnId", "userId", "userName", "tenantId"];
+const IDENTITY_FIELDS: readonly string[] = ["agent", "sessionId", "turnId", "userId", "userName", "tenantId"];
 
 function parseMcpServer(r: Reader, value: unknown, at: string): McpServerConfig {
 	const s = r.object(value, at);
@@ -399,13 +438,13 @@ function parseMcpServer(r: Reader, value: unknown, at: string): McpServerConfig 
 			...(cwd === undefined ? {} : { cwd }),
 		};
 	}
-	const forwardHeader = r.optionalString(s.forwardHeader, `${at}.forwardHeader`);
+	const tokenHeader = r.optionalString(s.tokenHeader, `${at}.tokenHeader`);
 	return {
 		...common,
 		transport,
 		url: r.string(s.url, `${at}.url`),
 		headers: stringMap(s.headers, `${at}.headers`),
-		auth: r.oneOf(s.auth, `${at}.auth`, ["static", "forward"] as const, "static"),
-		...(forwardHeader === undefined ? {} : { forwardHeader }),
+		auth: r.oneOf(s.auth, `${at}.auth`, ["static", "grant"] as const, "static"),
+		...(tokenHeader === undefined ? {} : { tokenHeader }),
 	};
 }

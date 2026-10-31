@@ -6,9 +6,10 @@ import { setupTracing } from "./util/tracing.ts";
 export type RunOptions = StartOptions & {
 	/**
 	 * The app's configuration: a config file (a path, or a URL such as `new URL("../config/agent.json", import.meta.url)`)
-	 * or a built `AppConfig`. A file is replaced by `AGENT_CONFIG` when that is set, as in containers.
+	 * or a built `AppConfig`. A file is replaced by `AGENT_CONFIG` when that is set, as in containers. Without this,
+	 * `AGENT_CONFIG` is required.
 	 */
-	readonly config: string | URL | AppConfig;
+	readonly config?: string | URL | AppConfig;
 	/** Loaded into `process.env` before the config is read, when present. Default `AGENT_ENV_FILE`, else `.env`. */
 	readonly envFile?: string;
 };
@@ -23,13 +24,12 @@ const FAILURE_EXIT_MS = 10_000;
 export async function runAgent(options: RunOptions): Promise<RunningAgent> {
 	const { config, envFile, ...start } = options;
 	loadDotEnv(envFile);
-	const resolved =
-		typeof config === "string" || config instanceof URL
-			? loadConfig(process.env.AGENT_CONFIG ?? (config instanceof URL ? fileURLToPath(config) : config))
-			: config;
+	const resolved = resolveConfig(config);
 
 	const log = (level: string, event: string, fields: Record<string, unknown> = {}) =>
-		(level === "error" ? console.error : console.log)(JSON.stringify({ time: new Date().toISOString(), level, event, ...fields }));
+		(level === "error" ? console.error : console.log)(
+			JSON.stringify({ time: new Date().toISOString(), level, event, agent: resolved.agent, ...fields }),
+		);
 	process.on("unhandledRejection", (reason) => {
 		log("error", "process.unhandled_rejection", { error: reason instanceof Error ? (reason.stack ?? reason.message) : String(reason) });
 	});
@@ -38,7 +38,7 @@ export async function runAgent(options: RunOptions): Promise<RunningAgent> {
 		process.exit(1);
 	});
 
-	const stopTracing = setupTracing();
+	const stopTracing = setupTracing(process.env, resolved.agent);
 	const agent = await startAgent(resolved, start);
 	let stopping = false;
 	const stop = (exitCode: number) => {
@@ -65,4 +65,11 @@ export async function runAgent(options: RunOptions): Promise<RunningAgent> {
 		stop(1);
 	});
 	return agent;
+}
+
+function resolveConfig(config: RunOptions["config"]): AppConfig {
+	if (config !== undefined && typeof config !== "string" && !(config instanceof URL)) return config;
+	const path = process.env.AGENT_CONFIG ?? (config instanceof URL ? fileURLToPath(config) : config);
+	if (path === undefined) throw new Error("AGENT_CONFIG must name the config file of the agent to run");
+	return loadConfig(path);
 }

@@ -9,10 +9,12 @@ export type Principal = {
 	readonly scopes: readonly string[];
 	/** Verified token claims; empty for non-JWT authenticators. */
 	readonly claims: Readonly<Record<string, unknown>>;
-	/** The bearer credential as presented, forwarded to MCP servers configured with `auth: "forward"`. */
+	/** The bearer credential as presented. It goes no further than the auth service, which exchanges it for a grant. */
 	readonly token: string;
-	/** Epoch milliseconds after which `token` must not be forwarded. */
+	/** Epoch milliseconds after which `token` is dead. */
 	readonly expiresAt?: number;
+	/** Set on a delegated token: the runtime acting for the user, and the grant it acts under. */
+	readonly agent?: { readonly runtime: string; readonly grantId: string };
 };
 
 /** What an authenticator may inspect: headers only, so auth runs before any body is read. */
