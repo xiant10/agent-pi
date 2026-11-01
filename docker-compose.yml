@@ -2,9 +2,7 @@ name: agent-pi
 
 # Both apps build from this repository root (the npm workspace).
 #   docker compose up -d --build                    # assistant on :9800
-#   docker compose --profile sales up -d --build    # also the sales agent on :9810 (needs kaidan-net)
-#   docker compose --profile sales up -d --build sales
-# Assistant reads ./.env; sales reads apps/sales/.env (copy each .env.example first).
+# Assistant reads ./.env (copy .env.example first).
 
 x-hardening: &hardening
   init: true
@@ -40,41 +38,6 @@ services:
     extra_hosts:
       - host.docker.internal:host-gateway
 
-  sales:
-    <<: *hardening
-    profiles: [sales]
-    build:
-      context: .
-      dockerfile: apps/sales/Dockerfile
-    image: ${SALES_IMAGE:-sales:latest}
-    env_file:
-      - path: apps/sales/.env
-        required: false
-    environment:
-      PORT: "9810"
-      LIVEKIT_ADAPTER_PORT: "8101"
-      AGENT_DATA_DIR: /data
-      TZ: ${AGENT_DEFAULT_TIME_ZONE:-Asia/Shanghai}
-    ports:
-      - "${SALES_PORT:-9810}:9810"
-      - "${LIVEKIT_ADAPTER_HOST_PORT:-8102}:8101"
-    volumes:
-      - sales-data:/data
-    extra_hosts:
-      - host.docker.internal:host-gateway
-    networks:
-      kaidan-net:
-        aliases:
-          - agent-pi-sales
-
-networks:
-  # Shared with agent-gateway and data-api. `docker network create kaidan-net` if the Kaidan stack isn't running.
-  kaidan-net:
-    name: ${KAIDAN_NETWORK:-kaidan-net}
-    external: true
-
 volumes:
   assistant-data:
     name: ${ASSISTANT_DATA_VOLUME:-agent-pi-assistant-data}
-  sales-data:
-    name: ${SALES_DATA_VOLUME:-agent-pi-sales-data}

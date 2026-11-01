@@ -1,0 +1,120 @@
+# One replica until ai-gateway-agent is deployed and workbench points at it:
+# before that, a second replica's sessions would be missing from the sidebar.
+#
+# Each pod owns its sessions on its own volume for life, so the pod's name is its
+# AGENT_INSTANCE_ID and session IDs read assistant.agent-pi-0.<n>. Replicas can
+# only be added. Scaling down strands the sessions on the removed volume.
+#
+# Each new replica needs an AGENT_URLS entry in ai-gateway-agent and in
+# t10-livekit-agent. The secret holds AUTH_CLIENT_SECRET and LLM_API_KEY.
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-pi
+  namespace: t10
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: agent-pi
+  ports:
+    - name: http
+      port: 9800
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: agent-pi
+  namespace: t10
+spec:
+  serviceName: agent-pi
+  replicas: 1
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agent-pi
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agent-pi
+        # Lets these pods through auth-server's network policy.
+        t10.dev/auth-client: "true"
+        # Lets these pods reach ai-gateway-llm.
+        t10.dev/llm-client: "true"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        # The image's node user. The volume has to be writable by it.
+        runAsUser: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: agent-pi
+          image: assistant:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 9800
+          env:
+            - name: AGENT_INSTANCE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: AGENT_CONFIG
+              value: /app/apps/assistant/config/agent.json
+            - name: PORT
+              value: "9800"
+            - name: AGENT_DATA_DIR
+              value: /data
+            - name: AUTH_KIND
+              value: jwt
+            - name: JWT_ALGORITHMS
+              value: ES256
+            - name: JWT_JWKS_URL
+              value: http://auth-server.t10.svc.cluster.local:8081/.well-known/jwks.json
+            - name: JWT_ISSUER
+              value: https://auth.example.com
+            # People's tokens carry t10, and a voice agent's grants agent-pi.
+            - name: JWT_AUDIENCE
+              value: t10,agent-pi
+            - name: JWT_REQUIRED_SCOPES
+              value: agent:use
+            - name: JWT_TENANT_CLAIM
+              value: tid
+            - name: AUTH_URL
+              value: http://auth-server.t10.svc.cluster.local:8081
+            - name: LLM_BASE_URL
+              value: http://ai-gateway-llm.t10.svc.cluster.local:7200/v1
+          envFrom:
+            - secretRef:
+                name: agent-pi
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 10Gi
