@@ -184,13 +184,13 @@ Methods:
 Client events (`session/event` notification `params`; the type is `ClientEventBody` in `events/mapper.ts`):
 
 ```
-snapshot        { busy, activeTools, inbox, tasks }   state when a GET stream starts without a resumable id
+snapshot        { busy, activeTools, inbox, tasks, partial? }   state when a GET stream starts without a resumable id
 run.started     { submissionIds }
 run.finished    { submissionIds }
-text.delta      { text }                         raw assistant text, for chat UIs
+text.delta      { text, offset, messageId, turnId? }   raw assistant text, for chat UIs
 speech          { text, index }                  speakable sentences, for TTS
 thinking.delta  { text }                         only when the profile sets thinkingEvents
-message.end     { text, stopReason, error?, source? }   source: the plugin that wrote it without the model
+message.end     { text, stopReason, error?, source?, messageId, turnId? }   source: the plugin that wrote it without the model
 tool.started    { callId, name }
 tool.finished   { callId, name, isError }
 tools.active    { names }                        the offered tool set changed (skill, search, preload, eviction)
@@ -201,6 +201,8 @@ retry           { attempt, at, error }           a model request is retried
 compaction      { phase }                        start | end
 error           { message }
 ```
+
+`offset` is where a delta starts in its message's text, so a client can spot a gap or ignore a duplicate. `partial` is `{ turnId?, messageId, text }`, the reply in progress: a client replaces that message's text with it and carries on from `offset` `text.length`. A `GET` stream ends cleanly when its token expires, and the client reconnects with a fresh token and `Last-Event-ID`.
 
 ## R2: steering
 

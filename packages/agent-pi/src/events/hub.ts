@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { type AgentEventStream, type ConversationId, type Harness, watchEvents } from "@earendil-works/pi-durable";
+import { type AgentEvent, type AgentEventStream, type ConversationId, type Harness, watchEvents } from "@earendil-works/pi-durable";
 import { TasksDoc } from "../agent/tasks.ts";
 import type { Logger } from "../util/log.ts";
 import { type ClientEventBody, EventMapper, type MapperOptions, type TaskStatus } from "./mapper.ts";
@@ -25,6 +25,8 @@ export type HubMapping = MapperOptions & {
 	readonly transform?: (event: ClientEventBody) => ClientEventBody[];
 	/** Sees every event as it happened, whatever `transform` makes of it. */
 	readonly observe?: (event: ClientEventBody) => void;
+	/** The turn of an input the conversation is answering. */
+	readonly turn?: (input: number) => Promise<string | undefined>;
 };
 
 export type HubOptions = {
@@ -93,7 +95,12 @@ export class SessionHub {
 	): Promise<SessionHub> {
 		const stream = await watchEvents(harness, conversationId, BACKGROUND_CONTEXT);
 		const hub = new SessionHub(conversationId, stream, new EventMapper(mapping), options, onStop);
-		const { transform, observe } = mapping;
+		const { transform, observe, turn } = mapping;
+		// Followed through the events, not read from live state: a short run can end before its events get here.
+		let input: number | undefined = stream.snapshot.run?.inputs.at(-1);
+		// A turn failing to resolve must not stop the stream; the events go out without it.
+		const resolveTurn = async () => hub.#mapper.setTurn(input === undefined ? undefined : await turn?.(input).catch(() => undefined));
+		if (stream.snapshot.generation?.message !== undefined) await resolveTurn();
 		const emit = (body: ClientEventBody) => {
 			observe?.(body);
 			// Snapshots carry the hub's own state; they are not for plugins to change.
@@ -102,7 +109,11 @@ export class SessionHub {
 			else for (const mapped of transform(body)) hub.#publish(mapped);
 		};
 		stream.start(async (events) => {
-			for (const event of events) for (const body of hub.#mapper.map(event)) emit(body);
+			for (const event of events) {
+				input = latestInput(event) ?? input;
+				if (startsMessage(event)) await resolveTurn();
+				for (const body of hub.#mapper.map(event)) emit(body);
+			}
 		});
 		// Absent for a session without the document, such as a child: it has no tasks to report.
 		const tasks = await harness.watchDoc(TasksDoc, conversationId, BACKGROUND_CONTEXT);
@@ -191,9 +202,17 @@ export class SessionHub {
 
 	#snapshot(): ClientEvent {
 		// Not buffered: it describes the moment of subscription, and its id lets the client resume from here.
+		const partial = this.#mapper.partial;
 		return {
 			id: `${this.#epoch}-${this.#seq}`,
-			body: { type: "snapshot", busy: this.#busy, activeTools: [...this.#activeTools], inbox: [...this.#inbox], tasks: [...this.#tasks.values()] },
+			body: {
+				type: "snapshot",
+				busy: this.#busy,
+				activeTools: [...this.#activeTools],
+				inbox: [...this.#inbox],
+				tasks: [...this.#tasks.values()],
+				...(partial === undefined ? {} : { partial }),
+			},
 		};
 	}
 
@@ -212,6 +231,19 @@ export class SessionHub {
 		}, delay);
 		this.#idleTimer.unref();
 	}
+}
+
+/** The input an event places in the conversation: a run's newest, or a steer joining the run. */
+function latestInput(event: AgentEvent): number | undefined {
+	if (event.type === "run_start") return event.inputs.at(-1);
+	if (event.type === "snapshot") return event.run?.inputs.at(-1);
+	return event.type === "submission" && event.record.status === "placed" ? event.record.id : undefined;
+}
+
+/** Whether an event begins or resumes an assistant message, so the mapper needs its turn. */
+function startsMessage(event: AgentEvent): boolean {
+	if (event.type === "message_start") return event.message.role === "assistant";
+	return event.type === "snapshot" && event.generation?.message !== undefined;
 }
 
 /** Opens at most one hub per conversation; concurrent callers share the opening. */

@@ -162,6 +162,16 @@ export async function currentTurnRecord(
 	return undefined;
 }
 
+/** The turn recorded for an input. `recordTurn` runs just after admission, so wait for it briefly, as `currentTurn` does. */
+export async function turnOfInput(reader: Harness, conversationId: ConversationId, input: number, context: Context): Promise<string | undefined> {
+	for (let attempt = 0; attempt < 12; attempt++) {
+		const turnId = (await recordedTurns(reader, conversationId, context)).get(input);
+		if (turnId !== undefined) return turnId;
+		await new Promise((resolve) => setTimeout(resolve, 25));
+	}
+	return undefined;
+}
+
 /**
  * The turn a conversation's work is for: a child's is its parent's, and a background child keeps the turn that started
  * it, because by the time it works its parent may be idle or in another turn.

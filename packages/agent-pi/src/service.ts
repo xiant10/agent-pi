@@ -30,7 +30,7 @@ import type { LimitsConfig } from "./config.ts";
 import { AppError, invalidParams, RPC } from "./errors.ts";
 import type { HubRegistry, SessionHub } from "./events/hub.ts";
 import type { ClientEventBody } from "./events/mapper.ts";
-import { recordedTurns, recordTurn, workTurn } from "./identity.ts";
+import { recordedTurns, recordTurn, turnOfInput, workTurn } from "./identity.ts";
 import { toolSpans } from "./events/tool-spans.ts";
 import { appendReply, type ReplyRecord, ReplyRequestsDoc } from "./plugins/history.ts";
 import { type PluginRunner, textOf } from "./plugins/runner.ts";
@@ -587,15 +587,21 @@ export class AgentService {
 		}
 		const profile = this.#profile(session.profile);
 		const transform = this.#deps.plugins.eventMapper({ sessionId, profile });
+		const currentWork = async () => {
+			// Read each time: a child's turn changes with each `task_send`.
+			const current = await this.#deps.harness.snapshot(SessionDoc, conversation.id, BACKGROUND_CONTEXT);
+			return workTurn(this.#deps.harness, conversation.id, current, BACKGROUND_CONTEXT);
+		};
 		return this.#deps.hubs.get(conversation.id, {
 			speech: profile.speech && !child,
 			thinking: profile.thinkingEvents,
 			...(transform === undefined ? {} : { transform }),
-			observe: toolSpans(async () => {
-				// Read each time: a child's turn changes with each `task_send`.
-				const current = await this.#deps.harness.snapshot(SessionDoc, conversation.id, BACKGROUND_CONTEXT);
-				return (await workTurn(this.#deps.harness, conversation.id, current, BACKGROUND_CONTEXT))?.traceparent;
-			}),
+			turn: async (input) => {
+				// A child's inputs have no turn of their own; its work belongs to its parent's.
+				if (!child) return turnOfInput(this.#deps.harness, conversation.id, input, BACKGROUND_CONTEXT);
+				return (await currentWork())?.turnId;
+			},
+			observe: toolSpans(async () => (await currentWork())?.traceparent),
 		});
 	}
 

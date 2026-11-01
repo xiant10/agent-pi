@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import type { AgentEvent, MessageChange, SnapshotEvent } from "@earendil-works/pi-durable";
 import { SpeechSegmenter } from "./speech.ts";
 
@@ -6,16 +7,23 @@ const MESSAGE_ENTRY = "app.message";
 
 export type TaskStatus = { taskId: string; name: string; status: string };
 
+/** Which reply a text event belongs to. `turnId` is absent when no turn is known, as for a plugin's message. */
+export type MessageRef = { turnId?: string; messageId: string };
+
+/** The reply in progress: everything sent so far, so a client that missed deltas can pick up from `offset` `text.length`. */
+export type PartialMessage = MessageRef & { text: string };
+
 /** What a client receives in each `session/event` notification. */
 export type ClientEventBody =
-	| { type: "snapshot"; busy: boolean; activeTools: string[]; inbox: { id: number; mode: string }[]; tasks: TaskStatus[] }
+	| { type: "snapshot"; busy: boolean; activeTools: string[]; inbox: { id: number; mode: string }[]; tasks: TaskStatus[]; partial?: PartialMessage }
 	| { type: "run.started"; submissionIds: number[] }
 	| { type: "run.finished"; submissionIds: number[] }
-	| { type: "text.delta"; text: string }
+	/** `offset`: where `text` starts in the message's text, to spot a gap or a duplicate. */
+	| ({ type: "text.delta"; text: string; offset: number } & Partial<MessageRef>)
 	| { type: "speech"; text: string; index: number }
 	| { type: "thinking.delta"; text: string }
 	/** `source`: the plugin that wrote the message without the model; absent for model answers. */
-	| { type: "message.end"; text: string; stopReason: string; error?: string; source?: string }
+	| ({ type: "message.end"; text: string; stopReason: string; error?: string; source?: string } & Partial<MessageRef>)
 	| { type: "tool.started"; callId: string; name: string }
 	| { type: "tool.finished"; callId: string; name: string; isError: boolean }
 	| { type: "tools.active"; names: string[] }
@@ -43,9 +51,21 @@ export class EventMapper {
 	#emitted = "";
 	#speechIndex = 0;
 	#tools: string[] | undefined;
+	#messageId: string | undefined;
+	#turnId: string | undefined;
 
 	constructor(options: MapperOptions) {
 		this.#options = options;
+	}
+
+	/** Set the turn of the message about to start, or of the one a snapshot is about to seed. */
+	setTurn(turnId: string | undefined): void {
+		this.#turnId = turnId;
+	}
+
+	/** The reply in progress, if any. */
+	get partial(): PartialMessage | undefined {
+		return this.#messageId === undefined ? undefined : { ...this.#ref(), text: this.#emitted };
 	}
 
 	/** Seed from the stream's attachment snapshot; returns the client snapshot. */
@@ -53,14 +73,18 @@ export class EventMapper {
 		const partial = snapshot.generation?.message;
 		this.#blocks = partial === undefined ? [] : copyBlocks(partial.content);
 		this.#emitted = textOf(this.#blocks);
+		// A resync of the message already in flight keeps its id, so a client sees one message.
+		this.#messageId = partial === undefined ? undefined : (this.#messageId ?? newMessageId());
 		this.#speech.reset();
 		this.#tools = Array.isArray(snapshot.agent.tools) ? [...snapshot.agent.tools] : undefined;
+		const inFlight = this.partial;
 		return {
 			type: "snapshot",
 			busy: snapshot.run !== undefined,
 			activeTools: this.#tools ?? [],
 			inbox: snapshot.inbox.map((item) => ({ id: item.id, mode: item.mode })),
 			tasks: [],
+			...(inFlight === undefined ? {} : { partial: inFlight }),
 		};
 	}
 
@@ -75,12 +99,15 @@ export class EventMapper {
 				break;
 			case "run_end":
 				this.#flushSpeech(out);
+				this.#messageId = undefined;
+				this.#turnId = undefined;
 				out.push({ type: "run.finished", submissionIds: [...event.inputs] });
 				break;
 			case "message_start":
 				if (event.message.role === "assistant") {
 					this.#blocks = copyBlocks(event.message.content);
 					this.#emitted = "";
+					this.#messageId = newMessageId();
 					this.#emitText(out);
 				}
 				break;
@@ -91,6 +118,8 @@ export class EventMapper {
 			case "message_end": {
 				const message = event.entry.model?.[0];
 				if (message?.role !== "assistant") break;
+				// A plugin's message has no `message_start`.
+				this.#messageId ??= newMessageId();
 				if (message.stopReason === "aborted" || message.stopReason === "error") {
 					// Interrupted speech is not finished: the client stops playback, nothing more is spoken.
 					this.#speech.reset();
@@ -102,6 +131,7 @@ export class EventMapper {
 				const source = (event.entry.data as { source?: unknown } | undefined)?.source;
 				out.push({
 					type: "message.end",
+					...this.#ref(),
 					text: textOf(copyBlocks(message.content)),
 					stopReason: message.stopReason,
 					...(message.errorMessage === undefined ? {} : { error: message.errorMessage }),
@@ -109,6 +139,8 @@ export class EventMapper {
 				});
 				this.#blocks = [];
 				this.#emitted = "";
+				this.#messageId = undefined;
+				this.#turnId = undefined;
 				break;
 			}
 			case "tool_execution_start":
@@ -193,11 +225,19 @@ export class EventMapper {
 			if (!text.startsWith(this.#emitted)) this.#emitted = text;
 			return;
 		}
-		const delta = text.slice(this.#emitted.length);
+		const offset = this.#emitted.length;
+		const delta = text.slice(offset);
 		this.#emitted = text;
-		out.push({ type: "text.delta", text: delta });
+		out.push({ type: "text.delta", ...this.#ref(), offset, text: delta });
 		if (!this.#options.speech) return;
 		for (const segment of this.#speech.push(delta)) out.push({ type: "speech", text: segment, index: this.#speechIndex++ });
+	}
+
+	#ref(): Partial<MessageRef> & { messageId: string } {
+		return {
+			...(this.#turnId === undefined ? {} : { turnId: this.#turnId }),
+			messageId: this.#messageId ?? newMessageId(),
+		};
 	}
 
 	#flushSpeech(out: ClientEventBody[]): void {
@@ -205,6 +245,10 @@ export class EventMapper {
 		const segment = this.#speech.flush();
 		if (segment !== undefined) out.push({ type: "speech", text: segment, index: this.#speechIndex++ });
 	}
+}
+
+function newMessageId(): string {
+	return `m${randomBytes(6).toString("hex")}`;
 }
 
 function copyBlocks(content: unknown): Block[] {

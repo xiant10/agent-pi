@@ -46,6 +46,11 @@ export type StreamableOptions = {
 	readonly maxBodyBytes: number;
 };
 
+/** The largest delay `setTimeout` honours; a longer one would fire at once. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+/** A stream opened on a token inside the verifier's leeway still lasts this long, so a reconnect can't spin. */
+const MIN_STREAM_MS = 1000;
+
 /** After `wait()` settles, how long to let the event stream deliver the final events before answering anyway. */
 const DRAIN_MS = 1000;
 
@@ -380,6 +385,19 @@ async function openEventStream(
 	);
 	for (const event of subscription.initial) sse.send(notification(sessionId, event), event.id);
 	sse.onClose(() => subscription.unsubscribe());
+	endAtExpiry(sse, principal);
+}
+
+/**
+ * A token is checked only when a stream opens, so a stream ends with its token: the client reconnects at once with a
+ * fresh token and `Last-Event-ID`, and a removed user gets no fresh token. An end sooner than expiry is harmless.
+ */
+function endAtExpiry(sse: SseStream, principal: Principal): void {
+	if (principal.expiresAt === undefined) return;
+	const delay = Math.min(Math.max(principal.expiresAt - Date.now(), MIN_STREAM_MS), MAX_TIMER_MS);
+	const timer = setTimeout(() => sse.end(), delay);
+	timer.unref();
+	sse.onClose(() => clearTimeout(timer));
 }
 
 function notification(sessionId: string, event: ClientEvent): unknown {
