@@ -20,7 +20,7 @@ import type { Profile } from "./agent/profiles.ts";
 import { ChildSlots, SUBAGENT_PARAMETERS, SUBAGENT_SERVER, type Subagent, subagentToolName } from "./agent/subagents.ts";
 import { parkedTasks } from "./agent/parked.ts";
 import { readSession } from "./agent/docs.ts";
-import type { Authenticator } from "./auth/authenticator.ts";
+import { AuthError, type Authenticator, withExtension } from "./auth/authenticator.ts";
 import { CredentialStore } from "./auth/credentials.ts";
 import { GrantBroker, type GrantBrokerOptions } from "./auth/grants.ts";
 import { JwtAuthenticator } from "./auth/jwt.ts";
@@ -239,7 +239,7 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 	// Sessions created right after startup should see the tools of every reachable server; slow servers join later.
 	await mcp.start(options.mcpStartupWaitMs ?? 10_000);
 
-	const authenticator = plugins.authenticator(await container.get(Services.authenticator));
+	const authenticator = withLiveGrants(plugins.authenticator(await container.get(Services.authenticator)), grants);
 	const mcpEndpoint = config.mcpEndpoint;
 	const server = createHttpServer({
 		authenticator,
@@ -393,6 +393,20 @@ function uniqueSkills(skills: readonly Skill[]): Skill[] {
 		if (sorted[i]!.name === sorted[i - 1]!.name) throw new Error(`two skills named ${sorted[i]!.name}`);
 	}
 	return sorted;
+}
+
+/** A delegated token also needs its grant chain live. With no auth service to ask, none can be checked. */
+function withLiveGrants(base: Authenticator, grants: GrantBroker | undefined): Authenticator {
+	if (grants === undefined) return base;
+	return withExtension(base, async (principal) => {
+		if (principal.agent === undefined) return principal;
+		try {
+			await grants.confirmChain(principal.agent.grantId);
+		} catch (error) {
+			throw new AuthError(401, "grant_not_live", error instanceof Error ? error.message : "the grant can't be confirmed");
+		}
+		return principal;
+	});
 }
 
 function configuredAuthenticator(config: AppConfig): Authenticator {

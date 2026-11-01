@@ -33,6 +33,7 @@ class FakeAuth {
 	readonly stopped = new Set<string>();
 	readonly expired = new Set<string>();
 	mints = 0;
+	chainReads = 0;
 	down = 0;
 	expiresIn = 300;
 	#next = 1;
@@ -60,7 +61,11 @@ class FakeAuth {
 			});
 		}
 		expect(new Headers(init?.headers).get("authorization")).toBe("Bearer service-token");
-		const path = /^\/v1\/grants\/([^/]+)\/(extend|revoke)$/.exec(url.pathname);
+		const path = /^\/v1\/grants\/([^/]+)\/(extend|revoke|chain)$/.exec(url.pathname);
+		if (path?.[2] === "chain") {
+			this.chainReads++;
+			return this.stopped.has(path[1]!) ? refuse("invalid_grant") : Response.json({ chain: [{ id: path[1] }] });
+		}
 		if (path?.[2] === "extend") {
 			if (this.stopped.has(path[1]!)) return refuse("invalid_grant");
 			this.extended.push(path[1]!);
@@ -230,6 +235,30 @@ describe("GrantBroker", () => {
 	});
 });
 
+describe("confirmChain", () => {
+	it("refuses a stopped grant, and reads the chain once a minute", async () => {
+		const auth = new FakeAuth();
+		let now = 1_000_000;
+		const grants = broker(auth, () => now);
+		await grants.confirmChain("grt_1");
+		await grants.confirmChain("grt_1");
+		expect(auth.chainReads).toBe(1);
+		auth.stopped.add("grt_1");
+		await grants.confirmChain("grt_1");
+		now += 60_000;
+		await expect(grants.confirmChain("grt_1")).rejects.toMatchObject({ reason: "stopped" });
+	});
+
+	it("refuses when the chain can't be read, and remembers no failure", async () => {
+		const auth = new FakeAuth();
+		const grants = broker(auth);
+		await grants.confirmChain("grt_warm"); // so the outage hits the chain read, not the service token
+		auth.down = 1;
+		await expect(grants.confirmChain("grt_1")).rejects.toMatchObject({ reason: "unavailable" });
+		await grants.confirmChain("grt_1");
+	});
+});
+
 describe("MCP servers with auth: grant", () => {
 	it("refuses a call with no grant", async () => {
 		const catalog = new ToolCatalog();
@@ -315,6 +344,21 @@ describe("a run under a grant", () => {
 	});
 
 	const JWT_AUTH = { kind: "jwt", algorithms: ["HS256"], hmacSecret: "unused" } as const;
+
+	it("refuses a delegated token whose grant is stopped, and leaves a user's token alone", async () => {
+		const auth = new FakeAuth();
+		auth.stopped.add("grt_stopped");
+		const principals: Record<string, Principal> = { live: delegated("grt_live"), stopped: delegated("grt_stopped"), person: user() };
+		running = await startTestAgent({
+			config: { auth: JWT_AUTH, grants: CONFIG },
+			grantOptions: { fetch: auth.fetch, retryDelayMs: 1 },
+			authenticator: { authenticate: async ({ headers }) => principals[String(headers.authorization).slice("Bearer ".length)]! },
+		});
+		expect((await rpc(running.url, "live", "session.list")).status).toBe(200);
+		expect((await rpc(running.url, "person", "session.list")).status).toBe(200);
+		expect((await rpc(running.url, "stopped", "session.list")).status).toBe(401);
+		expect(auth.chainReads).toBe(2);
+	});
 
 	async function start(auth: FakeAuth, overrides: Parameters<typeof testConfig>[0] = {}) {
 		const mcp = fakeMcpServer([{ name: "whoami", description: "Who is calling." }]);

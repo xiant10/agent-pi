@@ -44,6 +44,8 @@ export type GrantBrokerOptions = {
 const RENEW_BEFORE_MS = 60_000;
 const ATTEMPTS = 3;
 const REQUEST_TIMEOUT_MS = 10_000;
+/** A revocation reaches this service within this long, as `service-api.md` requires. */
+const CHAIN_CACHE_MS = 60_000;
 
 /**
  * Holds no user token. A user's request opens or renews a grant for the conversation, and tool calls then get short
@@ -58,6 +60,7 @@ export class GrantBroker {
 	readonly #byConversation = new Map<ConversationId, StoredGrant>();
 	readonly #tokens = new Map<string, Cached>();
 	readonly #minting = new Map<string, Promise<string>>();
+	readonly #confirmed = new Map<string, number>();
 	#service: Cached | undefined;
 	#read: ((conversationId: ConversationId) => Promise<StoredGrant | undefined>) | undefined;
 
@@ -210,11 +213,39 @@ export class GrantBroker {
 		return { token: body.access_token, expiresAt: this.#now() + body.expires_in * 1000 };
 	}
 
-	async #serviceCall(path: string, body: unknown): Promise<Record<string, unknown>> {
+	/**
+	 * Throw unless a delegated token's grant and its ancestors are live. A token outlives a revocation by up to its
+	 * 5 minutes, and this is what cuts that to a minute. Only a live answer is remembered, so an outage refuses.
+	 */
+	async confirmChain(grantId: string): Promise<void> {
+		const confirmed = this.#confirmed.get(grantId);
+		if (confirmed !== undefined && this.#now() - confirmed < CHAIN_CACHE_MS) return;
+		this.#confirmed.delete(grantId);
+		const service = await this.#serviceToken();
+		let response: Response;
+		try {
+			response = await this.#fetch(`${this.#config.url}/v1/grants/${encodeURIComponent(grantId)}/chain`, {
+				headers: { authorization: `Bearer ${service}` },
+				signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+			});
+		} catch (error) {
+			throw new GrantError("unavailable", error instanceof Error ? error.message : String(error));
+		}
+		if (response.status >= 500) throw new GrantError("unavailable", `the auth service answered ${response.status}`);
+		if (!response.ok) throw new GrantError("stopped", "the grant is no longer live");
+		for (const [id, at] of this.#confirmed) if (this.#now() - at >= CHAIN_CACHE_MS) this.#confirmed.delete(id);
+		this.#confirmed.set(grantId, this.#now());
+	}
+
+	async #serviceToken(): Promise<string> {
 		if (this.#service === undefined || this.#service.expiresAt - this.#now() <= RENEW_BEFORE_MS) {
 			this.#service = await this.#tokenRequest({ grant_type: "client_credentials" });
 		}
-		return this.#post(path, this.#service.token, body);
+		return this.#service.token;
+	}
+
+	async #serviceCall(path: string, body: unknown): Promise<Record<string, unknown>> {
+		return this.#post(path, await this.#serviceToken(), body);
 	}
 
 	/** Retries while the auth service is unreachable or failing. A refusal is an answer, so it isn't retried. */
