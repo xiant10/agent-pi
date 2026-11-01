@@ -4,9 +4,11 @@ import { SpeechSegmenter } from "./speech.ts";
 /** Kind of the entries plugins write without the model (`plugins/history.ts`). */
 const MESSAGE_ENTRY = "app.message";
 
+export type TaskStatus = { taskId: string; name: string; status: string };
+
 /** What a client receives in each `session/event` notification. */
 export type ClientEventBody =
-	| { type: "snapshot"; busy: boolean; activeTools: string[]; inbox: { id: number; mode: string }[] }
+	| { type: "snapshot"; busy: boolean; activeTools: string[]; inbox: { id: number; mode: string }[]; tasks: TaskStatus[] }
 	| { type: "run.started"; submissionIds: number[] }
 	| { type: "run.finished"; submissionIds: number[] }
 	| { type: "text.delta"; text: string }
@@ -17,6 +19,8 @@ export type ClientEventBody =
 	| { type: "tool.started"; callId: string; name: string }
 	| { type: "tool.finished"; callId: string; name: string; isError: boolean }
 	| { type: "tools.active"; names: string[] }
+	/** A background task started or changed status. */
+	| ({ type: "task.updated" } & TaskStatus)
 	| { type: "inbox"; items: { id: number; mode: string }[] }
 	| { type: "submission"; submissionId: number; status: string; reason?: string; detail?: string }
 	| { type: "retry"; attempt: number; at: number; error: string }
@@ -56,6 +60,7 @@ export class EventMapper {
 			busy: snapshot.run !== undefined,
 			activeTools: this.#tools ?? [],
 			inbox: snapshot.inbox.map((item) => ({ id: item.id, mode: item.mode })),
+			tasks: [],
 		};
 	}
 

@@ -19,6 +19,12 @@ export class CredentialStore {
 		if (entry !== undefined) this.#byConversation.set(child, { principal: entry.principal, seen: Date.now() });
 	}
 
+	/** Keep a principal past the idle sweep, for work no request is refreshing. */
+	touch(conversationId: ConversationId): void {
+		const entry = this.#byConversation.get(conversationId);
+		if (entry !== undefined) this.#byConversation.set(conversationId, { principal: entry.principal, seen: Date.now() });
+	}
+
 	get(conversationId: ConversationId): Principal | undefined {
 		return this.#byConversation.get(conversationId)?.principal;
 	}

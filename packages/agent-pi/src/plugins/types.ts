@@ -95,7 +95,7 @@ export type AgentPlugin = {
  * - `{ reject }`: refuse the input with 422; nothing is written.
  */
 export type PromptDecision =
-	| { readonly input?: UserInput; readonly activateTools?: readonly string[] }
+	| { readonly input?: UserInput; readonly note?: string; readonly activateTools?: readonly string[] }
 	| { readonly reply: string }
 	| { readonly reject: string; readonly code?: string };
 
@@ -135,6 +135,11 @@ export type TurnContext = SessionContext & {
 	readonly input: UserInput;
 	/** The input's text blocks, joined. */
 	readonly text: string;
+	/**
+	 * What the client told the model about this turn, which nobody said and the transcript leaves out. Not in `input` or
+	 * `text`, so it cannot trip a shortcut, but it reaches the model: a plugin that filters input should filter this too.
+	 */
+	readonly note?: string;
 	readonly requestId?: string;
 	/** The turn this input starts: the client's, else generated when the call arrived. Sent to the model gateway too. */
 	readonly turnId: string;

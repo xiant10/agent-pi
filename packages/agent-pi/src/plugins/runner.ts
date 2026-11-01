@@ -28,7 +28,7 @@ import type { Skill } from "../skills/skills.ts";
 import type { CatalogEntry, ToolCatalog } from "../tools/catalog.ts";
 import { type Logger, SILENT_LOGGER } from "../util/log.ts";
 import type { Container } from "./container.ts";
-import { currentTurn } from "../identity.ts";
+import { workTurn } from "../identity.ts";
 import { PluginStateDoc, pluginState, sessionHistory } from "./history.ts";
 import type {
 	AgentPlugin,
@@ -54,7 +54,7 @@ export type PluginRuntime = {
 
 /** How an input continues after `beforePrompt`. */
 export type PromptOutcome =
-	| { readonly kind: "model"; readonly input: UserInput; readonly activate: readonly string[] }
+	| { readonly kind: "model"; readonly input: UserInput; readonly note?: string | undefined; readonly activate: readonly string[] }
 	| { readonly kind: "reply"; readonly input: UserInput; readonly text: string; readonly plugin: string };
 
 /** Runs the plugins' hooks in order and turns their contributions into harness parts. */
@@ -223,11 +223,13 @@ export class PluginRunner {
 		session: Readonly<SessionState>,
 		principal: Principal,
 		input: UserInput,
+		note: string | undefined,
 		requestId: string | undefined,
 		turnId: string,
 		context: Context,
 	): Promise<PromptOutcome> {
 		let current = input;
+		let currentNote = note;
 		const activate: string[] = [];
 		for (const plugin of this.plugins) {
 			if (plugin.beforePrompt === undefined) continue;
@@ -236,6 +238,7 @@ export class PluginRunner {
 				principal,
 				input: current,
 				text: textOf(current),
+				...(currentNote === undefined ? {} : { note: currentNote }),
 				...(requestId === undefined ? {} : { requestId }),
 				turnId,
 			});
@@ -245,9 +248,10 @@ export class PluginRunner {
 			}
 			if ("reply" in decision) return { kind: "reply", input: current, text: decision.reply, plugin: plugin.name };
 			if (decision.input !== undefined) current = decision.input;
+			if (decision.note !== undefined) currentNote = decision.note;
 			activate.push(...(decision.activateTools ?? []));
 		}
-		return { kind: "model", input: current, activate };
+		return { kind: "model", input: current, note: currentNote, activate };
 	}
 
 	/** Each plugin's `afterRun`, in the background; failures are logged. */
@@ -343,7 +347,7 @@ export class PluginRunner {
 			userId: session?.userId,
 			userName: session?.userName,
 			tenantId: session?.tenantId,
-			turnId: session === undefined ? undefined : await currentTurn(api, api.conversationId, context),
+			turnId: session === undefined ? undefined : (await workTurn(api, api.conversationId, session, context))?.turnId,
 			profile: profileOf(session?.profile),
 			metadata: session?.metadata,
 			principal: credentials.get(api.conversationId),

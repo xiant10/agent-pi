@@ -7,12 +7,13 @@ import {
 	defineExtension,
 	type Extension,
 	GenerationTask,
+	type Harness,
 	hook,
 	type JsonObject,
 	LiveDoc,
 	ProviderDoc,
 } from "@earendil-works/pi-durable";
-import { readSession } from "./agent/docs.ts";
+import { readSession, type SessionState } from "./agent/docs.ts";
 import type { Principal } from "./auth/authenticator.ts";
 import type { CredentialStore } from "./auth/credentials.ts";
 import { startSpan } from "./util/tracing.ts";
@@ -114,6 +115,12 @@ export function recordTurn(
 	}, context);
 }
 
+/** The input submissions with a known turn, newest last. Older ones have been dropped. */
+export async function recordedTurns(reader: Harness, conversationId: ConversationId, context: Context): Promise<ReadonlyMap<number, string>> {
+	const turns = await reader.snapshot(TurnsDoc, conversationId, context);
+	return new Map(Object.entries(turns?.bySubmission ?? {}).map(([id, turnId]) => [Number(id), turnId]));
+}
+
 /**
  * The turn of the input a run is answering now: the newest input of the run, so a steering message starts a new turn.
  * `recordTurn` runs just after the submission is admitted, so a run that starts at once may look a few milliseconds
@@ -152,6 +159,19 @@ export async function currentTurnRecord(
 		await new Promise((resolve) => setTimeout(resolve, 25));
 	}
 	return undefined;
+}
+
+/**
+ * The turn a conversation's work is for: a child's is its parent's, and a background child keeps the turn that started
+ * it, because by the time it works its parent may be idle or in another turn.
+ */
+export async function workTurn(
+	reader: unknown,
+	conversationId: ConversationId,
+	session: Readonly<SessionState> | undefined,
+	context: Context,
+): Promise<{ readonly turnId: string; readonly traceparent?: string } | undefined> {
+	return session?.origin ?? currentTurnRecord(reader, (session?.parent as ConversationId | undefined) ?? conversationId, context);
 }
 
 /** Identities of the conversations that are generating, by the provider session id pi-durable passes to the model. */
@@ -276,7 +296,7 @@ export function identityExtension(
 					const provider = await api.snapshot(ProviderDoc, api.conversationId, context);
 					if (provider === undefined) return undefined;
 					const principal = credentials.get(api.conversationId);
-					const turn = await currentTurnRecord(api, owner, context);
+					const turn = await workTurn(api, api.conversationId, session, context);
 					registry.set(provider.sessionId, {
 						agent,
 						sessionId: publicId(owner),

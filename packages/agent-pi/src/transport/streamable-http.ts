@@ -7,6 +7,7 @@ import { AppError, invalidParams, RPC } from "../errors.ts";
 import type { ClientEvent } from "../events/hub.ts";
 import { validTurnId } from "../identity.ts";
 import type { Admitted, AgentService, PromptOptions } from "../service.ts";
+import type { SessionChanges } from "../sessions.ts";
 import type { Logger } from "../util/log.ts";
 import { validTraceparent } from "../util/tracing.ts";
 import { SseStream } from "./sse.ts";
@@ -24,6 +25,8 @@ export const CORE_METHODS = [
 	"session.create",
 	"session.list",
 	"session.get",
+	"session.messages",
+	"session.update",
 	"session.prompt",
 	"session.steer",
 	"session.interrupt",
@@ -134,9 +137,30 @@ async function dispatch(
 			return { result: info, headers: { [SESSION_HEADER]: info.sessionId } };
 		}
 		case "session.list":
-			return { result: { sessions: await service.listSessions(principal, context) } };
+			return {
+				result: await service.listSessions(
+					principal,
+					{
+						...(params.archived === undefined ? {} : { archived: params.archived === true }),
+						...(params.limit === undefined ? {} : { limit: pageSize(params.limit) }),
+						...(params.cursor === undefined ? {} : { cursor: cursorParam(params.cursor) }),
+					},
+					context,
+				),
+			};
 		case "session.get":
 			return { result: await service.getSession(principal, session(), context) };
+		case "session.messages":
+			return {
+				result: await service.messages(
+					principal,
+					session(),
+					{ limit: params.limit === undefined ? 50 : pageSize(params.limit), ...(params.cursor === undefined ? {} : { before: cursorParam(params.cursor) }) },
+					context,
+				),
+			};
+		case "session.update":
+			return { result: await service.updateSession(principal, session(), sessionChanges(params), context) };
 		case "session.prompt": {
 			const admitted = await service.prompt(principal, session(), params.input, promptOptions(params, req), context);
 			return { result: await settle(admitted, params.wait !== false, service, waitContext) };
@@ -154,7 +178,7 @@ async function dispatch(
 			return { result: await settle(admitted, params.wait !== false, service, waitContext) };
 		}
 		case "session.cancel":
-			await service.cancel(principal, session(), context);
+			await service.cancel(principal, session(), context, { tasks: params.tasks === true });
 			return { result: { aborted: true } };
 		case "session.retry":
 			return { result: { retried: await service.retry(principal, session(), context) } };
@@ -386,7 +410,9 @@ function promptOptions(params: Record<string, unknown>, req: IncomingMessage): P
 	if (duringTools !== undefined && duringTools !== "abort" && duringTools !== "steer") {
 		throw invalidParams('duringTools must be "abort" or "steer"');
 	}
+	const note = optionalString(params.note, "note");
 	return {
+		...(note === undefined ? {} : { note }),
 		...(requestId === undefined ? {} : { requestId }),
 		...(turnId === undefined ? {} : { turnId }),
 		...(typeof traceparent === "string" && validTraceparent(traceparent) ? { traceparent } : {}),
@@ -413,6 +439,28 @@ function stringParam(value: unknown, name: string): string {
 
 function optionalString(value: unknown, name: string): string | undefined {
 	return value === undefined ? undefined : stringParam(value, name);
+}
+
+const MAX_PAGE = 200;
+const MAX_TITLE_CHARS = 200;
+
+function pageSize(value: unknown): number {
+	if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > MAX_PAGE) throw invalidParams(`limit must be 1 to ${MAX_PAGE}`);
+	return value;
+}
+
+function cursorParam(value: unknown): number {
+	const cursor = Number(value);
+	if (typeof value !== "string" || !Number.isInteger(cursor) || cursor < 0) throw invalidParams("invalid cursor");
+	return cursor;
+}
+
+function sessionChanges(params: Record<string, unknown>): SessionChanges {
+	const { title, pinned, archived } = params;
+	if (title !== undefined && (typeof title !== "string" || title.length > MAX_TITLE_CHARS)) throw invalidParams(`title must be at most ${MAX_TITLE_CHARS} characters`);
+	if (pinned !== undefined && typeof pinned !== "boolean") throw invalidParams("pinned must be a boolean");
+	if (archived !== undefined && typeof archived !== "boolean") throw invalidParams("archived must be a boolean");
+	return { ...(title === undefined ? {} : { title }), ...(pinned === undefined ? {} : { pinned }), ...(archived === undefined ? {} : { archived }) };
 }
 
 function objectParam(value: unknown, name: string): JsonObject {

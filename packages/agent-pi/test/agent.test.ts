@@ -46,7 +46,7 @@ describe("auth and ownership", () => {
 	});
 
 	it("enforces the per-user session limit", async () => {
-		running = await startTestAgent({ config: { limits: { maxSessionsPerUser: 1, maxConcurrentRunsPerUser: 3, maxConcurrentRuns: 50, maxInputChars: 100, maxBodyBytes: 100_000, maxSubagentsPerSession: 3 } } });
+		running = await startTestAgent({ config: { limits: { maxSessionsPerUser: 1, maxConcurrentRunsPerUser: 3, maxConcurrentRuns: 50, maxInputChars: 100, maxBodyBytes: 100_000, maxSubagentsPerSession: 3, maxBackgroundRunsPerUser: 3, maxTasksPerSession: 5, maxUnattendedRuns: 10, maxUnattendedTokens: 1_000_000 } } });
 		await createSession(running);
 		const second = await rpc(running.url, TOKENS.alice, "session.create");
 		expect(second.status).toBe(429);
@@ -214,7 +214,7 @@ describe("steering and interrupts", () => {
 			release = resolve;
 		});
 		const mcp = fakeMcpServer([{ name: "slow_lookup", description: "Slow lookup.", call: async () => (await gate, "looked up") }]);
-		running = await startTestAgent({ mcp, config: { profiles: { chat: { model: "main", thinkingLevel: "off", alwaysOnTools: ["crm:slow_lookup"], maxActiveTools: 12, preload: { maxTools: 0, minScore: 4 }, speech: false, thinkingEvents: false } } } });
+		running = await startTestAgent({ mcp, config: { profiles: { chat: { model: "main", thinkingLevel: "off", alwaysOnTools: ["crm:slow_lookup"], maxActiveTools: 12, preload: { maxTools: 0, minScore: 4 }, speech: false, thinkingEvents: false, taskReports: "wake" } } } });
 		const seen: string[][] = [];
 		running.faux.setResponses([
 			fauxAssistantMessage([fauxToolCall("crm_slow_lookup", {})], { stopReason: "toolUse" }),
@@ -254,7 +254,7 @@ describe("steering and interrupts", () => {
 			release = resolve;
 		});
 		const mcp = fakeMcpServer([{ name: "send", description: "Send.", call: async () => (await gate, "sent") }]);
-		running = await startTestAgent({ mcp, config: { profiles: { chat: { model: "main", thinkingLevel: "off", alwaysOnTools: ["crm:send"], maxActiveTools: 12, preload: { maxTools: 0, minScore: 4 }, speech: false, thinkingEvents: false } } } });
+		running = await startTestAgent({ mcp, config: { profiles: { chat: { model: "main", thinkingLevel: "off", alwaysOnTools: ["crm:send"], maxActiveTools: 12, preload: { maxTools: 0, minScore: 4 }, speech: false, thinkingEvents: false, taskReports: "wake" } } } });
 		const results: string[] = [];
 		running.faux.setResponses([
 			fauxAssistantMessage([fauxToolCall("crm_send", {})], { stopReason: "toolUse" }),
@@ -363,7 +363,7 @@ describe("expert, credentials, restart", () => {
 						maxActiveTools: 12,
 						preload: { maxTools: 0, minScore: 4 },
 						speech: true,
-						thinkingEvents: false,
+						thinkingEvents: false, taskReports: "wake",
 						expert: { model: "expert", thinkingLevel: "high" },
 					},
 				},

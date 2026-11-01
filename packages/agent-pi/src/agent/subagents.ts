@@ -10,9 +10,12 @@ import {
 	type ModelRef,
 	ProviderDoc,
 	type Submission,
+	type TaskId,
 	type ToolExecutionApi,
 	type ToolRegistration,
+	type Tx,
 	UsageDoc,
+	type UsageState,
 } from "@earendil-works/pi-durable";
 import type { CredentialStore } from "../auth/credentials.ts";
 import type { GrantBroker } from "../auth/grants.ts";
@@ -27,7 +30,7 @@ export const SUBAGENT_PREFIX = "agent_";
 /** A parent keeps this many child ids, newest last, for `session.get`. */
 const MAX_LISTED = 20;
 
-const DEFAULT_TIMEOUT_MS = 300_000;
+export const DEFAULT_TIMEOUT_MS = 300_000;
 
 /** A sub-agent the config declares. */
 export type Subagent = {
@@ -39,17 +42,25 @@ export type Subagent = {
 	/** Catalog patterns, plus meta-tools by name: the child's starting tool set. */
 	readonly tools: readonly string[];
 	readonly timeoutMs?: number;
+	/** Run as a background task: the tool returns at once, and the child reports when its turn ends. */
+	readonly background?: boolean;
+	readonly idleTtlMs?: number;
+	readonly maxLifetimeMs?: number;
 };
 
-/** One delegated task. */
-type ChildSpec = {
-	readonly label: string;
-	readonly requestId: string;
+/** A child conversation's agent. */
+export type ChildAgent = {
 	readonly model: ModelRef;
 	readonly thinkingLevel: ModelThinkingLevel;
 	readonly instructions?: string;
 	/** The child's tools given the set it copied from its parent. */
 	readonly tools: (inherited: readonly string[]) => string[];
+};
+
+/** One delegated task. */
+type ChildSpec = ChildAgent & {
+	readonly label: string;
+	readonly requestId: string;
 	readonly timeoutMs?: number;
 };
 
@@ -86,7 +97,7 @@ export class ChildSlots {
 	}
 }
 
-function failure(text: string) {
+export function failure(text: string) {
 	return { isError: true, output: [{ type: "text" as const, text }] };
 }
 
@@ -101,23 +112,7 @@ export async function runChild(deps: ChildDeps, api: ToolExecutionApi, spec: Chi
 	if (release === undefined) return failure(`Too many ${spec.label}s are running. Wait for one to finish, then try again.`);
 	let child: ConversationId | undefined;
 	try {
-		child = await api.commit(async (tx) => {
-			const existing = (await tx.scanConversations({ ownerTaskId: api.taskId }, 1)).items[0];
-			if (existing !== undefined) return existing.id;
-			const created = await tx.createConversation({ ownership: { kind: "task", taskId: api.taskId } });
-			await configure(tx, created.id, {
-				model: spec.model,
-				thinkingLevel: spec.thinkingLevel,
-				...(spec.instructions === undefined ? {} : { instructions: spec.instructions }),
-			});
-			const agent = await tx.doc(AgentDoc, created.id);
-			agent.tools = spec.tools(Array.isArray(agent.tools) ? agent.tools : []);
-			Object.assign(await tx.doc(SessionDoc, created.id), childSession(parent, api.conversationId));
-			await tx.doc(ProviderDoc, created.id);
-			const listed = await tx.doc(SessionDoc, api.conversationId);
-			listed.subagents = [...(listed.subagents ?? []), created.id].slice(-MAX_LISTED);
-			return created.id;
-		}, context);
+		child = await api.commit((tx) => createChild(tx, api.taskId, api.conversationId, parent, spec), context);
 		deps.credentials.inherit(child, api.conversationId);
 		const grant = await deps.grants?.spawn(child, api.conversationId);
 		if (grant !== undefined) {
@@ -163,37 +158,66 @@ export async function runChild(deps: ChildDeps, api: ToolExecutionApi, spec: Chi
 	}
 }
 
+/** The conversation `owner` owns, created as a child session of `parentId` unless a rerun already did. */
+export async function createChild(
+	tx: Tx,
+	owner: TaskId,
+	parentId: ConversationId,
+	parent: Readonly<SessionState>,
+	spec: ChildAgent,
+	session: Partial<SessionState> = {},
+): Promise<ConversationId> {
+	const existing = (await tx.scanConversations({ ownerTaskId: owner }, 1)).items[0];
+	if (existing !== undefined) return existing.id;
+	const created = await tx.createConversation({ ownership: { kind: "task", taskId: owner } });
+	await configure(tx, created.id, {
+		model: spec.model,
+		thinkingLevel: spec.thinkingLevel,
+		...(spec.instructions === undefined ? {} : { instructions: spec.instructions }),
+	});
+	const agent = await tx.doc(AgentDoc, created.id);
+	agent.tools = spec.tools(Array.isArray(agent.tools) ? agent.tools : []);
+	Object.assign(await tx.doc(SessionDoc, created.id), childSession(parent, parentId), session);
+	await tx.doc(ProviderDoc, created.id);
+	const listed = await tx.doc(SessionDoc, parentId);
+	listed.subagents = [...(listed.subagents ?? []), created.id].slice(-MAX_LISTED);
+	return created.id;
+}
+
 /** A child's session: its parent's owner and profile, none of its grant or children. */
 function childSession(parent: Readonly<SessionState>, parentId: ConversationId): SessionState {
-	const { grantId: _grantId, grantParent: _grantParent, subagents: _subagents, ...inherited } = parent;
+	const { grantId: _grantId, grantParent: _grantParent, subagents: _subagents, transient: _transient, ...inherited } = parent;
 	return { ...inherited, parent: parentId, createdAt: Date.now() };
 }
 
 /** The child's whole spend, for the tool result. Durable records it under the tool's name in the parent's usage. */
 async function childUsage(api: ToolExecutionApi, child: ConversationId, context: Context): Promise<Usage | undefined> {
-	const state = await api.snapshot(UsageDoc, child, context);
+	return usageTotal(await api.snapshot(UsageDoc, child, context));
+}
+
+export function noUsage(): Usage {
+	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+}
+
+export function addUsage(total: Usage, usage: Usage): void {
+	total.input += usage.input;
+	total.output += usage.output;
+	total.cacheRead += usage.cacheRead;
+	total.cacheWrite += usage.cacheWrite;
+	total.totalTokens += usage.totalTokens;
+	total.cost.input += usage.cost.input;
+	total.cost.output += usage.cost.output;
+	total.cost.cacheRead += usage.cost.cacheRead;
+	total.cost.cacheWrite += usage.cost.cacheWrite;
+	total.cost.total += usage.cost.total;
+}
+
+/** A conversation's whole spend, or undefined before it has any. */
+export function usageTotal(state: Readonly<UsageState> | undefined): Usage | undefined {
 	const buckets = [...Object.values(state?.models ?? {}), ...Object.values(state?.tools ?? {})] as unknown as Usage[];
 	if (buckets.length === 0) return undefined;
-	const total: Usage = {
-		input: 0,
-		output: 0,
-		cacheRead: 0,
-		cacheWrite: 0,
-		totalTokens: 0,
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-	};
-	for (const usage of buckets) {
-		total.input += usage.input;
-		total.output += usage.output;
-		total.cacheRead += usage.cacheRead;
-		total.cacheWrite += usage.cacheWrite;
-		total.totalTokens += usage.totalTokens;
-		total.cost.input += usage.cost.input;
-		total.cost.output += usage.cost.output;
-		total.cost.cacheRead += usage.cost.cacheRead;
-		total.cost.cacheWrite += usage.cost.cacheWrite;
-		total.cost.total += usage.cost.total;
-	}
+	const total = noUsage();
+	for (const usage of buckets) addUsage(total, usage);
 	return total;
 }
 
@@ -231,7 +255,7 @@ export function subagentToolName(subagent: Pick<Subagent, "name">): string {
 	return `${SUBAGENT_PREFIX}${subagent.name}`;
 }
 
-function startingTools(subagent: Subagent, catalog: ToolCatalog): string[] {
+export function startingTools(subagent: Subagent, catalog: ToolCatalog): string[] {
 	const agents = new Set(catalog.entries(SUBAGENT_SERVER).map((entry) => entry.name));
 	const meta = META_TOOLS.filter((name) => subagent.tools.includes(name));
 	return [...meta, ...catalog.match(subagent.tools).filter((name) => !agents.has(name))];

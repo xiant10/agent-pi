@@ -20,6 +20,8 @@ export type Profile = {
 	readonly speech: boolean;
 	/** Emit `thinking.delta` events. */
 	readonly thinkingEvents: boolean;
+	/** `wake`: a background task's report starts a run. `note`: it waits for the next user input. */
+	readonly taskReports: "wake" | "note";
 	/** Offer `consult_expert`, backed by this model. */
 	readonly expert?: { readonly model: ModelRef; readonly thinkingLevel: ModelThinkingLevel };
 };

@@ -33,6 +33,7 @@ import { IdentityRegistry, identityExtension } from "./identity.ts";
 import { PluginRunner } from "./plugins/runner.ts";
 import { type ConfiguredModels, type McpTransportFactory, Services } from "./plugins/services.ts";
 import type { AgentPlugin, PluginCatalog } from "./plugins/types.ts";
+import { RunTracker } from "./runs.ts";
 import { AgentService } from "./service.ts";
 import { resolveInstance, SessionStore } from "./sessions.ts";
 import { discoverSkills, type Skill } from "./skills/skills.ts";
@@ -129,6 +130,7 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 	let failed = false;
 	const identity = await container.get(Services.identity);
 	const subagents = buildSubagents(config, (await container.get(Services.models)).refs);
+	const runs = new RunTracker();
 	const registry = createRegistry();
 	registry.install(instructionsExtension(config.instructions));
 	for (const extension of plugins.extensions(profileOf, credentials)) registry.install(extension);
@@ -142,6 +144,10 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 			subagents,
 			credentials,
 			slots: new ChildSlots(config.limits.maxSubagentsPerSession),
+			limits: config.limits,
+			runs,
+			harness: () => harness,
+			woken: (conversationId, session, submission, turnId) => service.woken(conversationId, session, submission, turnId),
 			stopping: () => closing || failed,
 			...(grants === undefined ? {} : { grants }),
 		}),
@@ -219,6 +225,7 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 		...(grants === undefined ? {} : { grants }),
 		hubs,
 		plugins,
+		runs,
 		limits: config.limits,
 		log,
 	});
@@ -340,6 +347,7 @@ function buildProfiles(config: AppConfig, refs: ReadonlyMap<string, ModelRef>): 
 			preload: profile.preload,
 			speech: profile.speech,
 			thinkingEvents: profile.thinkingEvents,
+			taskReports: profile.taskReports,
 			...(profile.expert === undefined
 				? {}
 				: { expert: { model: ref(profile.expert.model), thinkingLevel: profile.expert.thinkingLevel } }),

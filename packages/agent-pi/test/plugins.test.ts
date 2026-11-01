@@ -145,7 +145,7 @@ describe("plugin replies while busy", () => {
 			plugins: [plugin],
 			config: {
 				profiles: {
-					chat: { model: "main", thinkingLevel: "off", alwaysOnTools: ["desk:*"], maxActiveTools: 12, preload: { maxTools: 0, minScore: 4 }, speech: false, thinkingEvents: false },
+					chat: { model: "main", thinkingLevel: "off", alwaysOnTools: ["desk:*"], maxActiveTools: 12, preload: { maxTools: 0, minScore: 4 }, speech: false, thinkingEvents: false, taskReports: "wake" },
 				},
 			},
 		});
@@ -246,7 +246,7 @@ describe("run limits", () => {
 		});
 		running = await startTestAgent({
 			plugins: [slow],
-			config: { limits: { maxSessionsPerUser: 5, maxConcurrentRunsPerUser: 1, maxConcurrentRuns: 50, maxInputChars: 10_000, maxBodyBytes: 1_000_000, maxSubagentsPerSession: 3 } },
+			config: { limits: { maxSessionsPerUser: 5, maxConcurrentRunsPerUser: 1, maxConcurrentRuns: 50, maxInputChars: 10_000, maxBodyBytes: 1_000_000, maxSubagentsPerSession: 3, maxBackgroundRunsPerUser: 3, maxTasksPerSession: 5, maxUnattendedRuns: 10, maxUnattendedTokens: 1_000_000 } },
 		});
 		running.faux.setResponses([fauxAssistantMessage([fauxText("one")]), fauxAssistantMessage([fauxText("two")])]);
 		const a = await createSession(running);
@@ -349,7 +349,7 @@ describe("model and tool hooks", () => {
 			plugins: [policy],
 			config: {
 				profiles: {
-					chat: { model: "main", thinkingLevel: "off", alwaysOnTools: ["policy:*"], maxActiveTools: 12, preload: { maxTools: 0, minScore: 4 }, speech: false, thinkingEvents: false },
+					chat: { model: "main", thinkingLevel: "off", alwaysOnTools: ["policy:*"], maxActiveTools: 12, preload: { maxTools: 0, minScore: 4 }, speech: false, thinkingEvents: false, taskReports: "wake" },
 				},
 			},
 		});

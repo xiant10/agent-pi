@@ -18,6 +18,7 @@ export type ProfileConfig = {
 	readonly preload: { readonly maxTools: number; readonly minScore: number };
 	readonly speech: boolean;
 	readonly thinkingEvents: boolean;
+	readonly taskReports: "wake" | "note";
 	readonly expert?: { readonly model: string; readonly thinkingLevel: ModelThinkingLevel };
 };
 
@@ -33,6 +34,14 @@ export type LimitsConfig = {
 	readonly maxBodyBytes: number;
 	/** Child conversations running at once per session, `consult_expert` included. */
 	readonly maxSubagentsPerSession: number;
+	/** Background child runs at once per user, apart from `maxConcurrentRunsPerUser`. Past it, a run waits for a slot. */
+	readonly maxBackgroundRunsPerUser: number;
+	/** Background tasks alive at once per session. */
+	readonly maxTasksPerSession: number;
+	/** Runs background tasks may start before a user speaks again. Past it, reports wait for the next input. */
+	readonly maxUnattendedRuns: number;
+	/** Tokens a session may spend, background tasks included, before a user speaks again. Past it, reports wait likewise. */
+	readonly maxUnattendedTokens: number;
 };
 
 /** A sub-agent, offered as the catalog tool `agent_<name>`. */
@@ -43,6 +52,12 @@ export type SubagentConfig = {
 	readonly instructions?: string;
 	readonly tools: readonly string[];
 	readonly timeoutMs?: number;
+	/** Run as a background task instead of a tool call the parent waits for. */
+	readonly background?: boolean;
+	/** How long a background task may wait for a reply. */
+	readonly idleTtlMs?: number;
+	/** How long a background task may live. */
+	readonly maxLifetimeMs?: number;
 };
 
 /** A capability this agent offers MCP clients: one tool taking a `task`. */
@@ -282,6 +297,7 @@ export function loadConfig(path: string): AppConfig {
 			},
 			speech: r.boolean(p.speech, `${at}.speech`, false),
 			thinkingEvents: r.boolean(p.thinkingEvents, `${at}.thinkingEvents`, false),
+			taskReports: r.oneOf(p.taskReports, `${at}.taskReports`, ["wake", "note"] as const, "wake"),
 			...(expertRaw === undefined
 				? {}
 				: {
@@ -302,6 +318,9 @@ export function loadConfig(path: string): AppConfig {
 		const s = r.object(value, at);
 		const instructionsFile = r.optionalString(s.instructionsFile, `${at}.instructionsFile`);
 		const timeoutMs = r.optionalNumber(s.timeoutMs, `${at}.timeoutMs`);
+		const background = r.boolean(s.background, `${at}.background`, false);
+		const idleTtlMs = r.optionalNumber(s.idleTtlMs, `${at}.idleTtlMs`);
+		const maxLifetimeMs = r.optionalNumber(s.maxLifetimeMs, `${at}.maxLifetimeMs`);
 		subagents[name] = {
 			description: r.string(s.description, `${at}.description`),
 			model: modelName(s.model, `${at}.model`),
@@ -309,6 +328,9 @@ export function loadConfig(path: string): AppConfig {
 			...(instructionsFile === undefined ? {} : { instructions: readText(instructionsFile, `${at}.instructionsFile`) }),
 			tools: r.strings(s.tools, `${at}.tools`),
 			...(timeoutMs === undefined ? {} : { timeoutMs }),
+			...(background ? { background } : {}),
+			...(idleTtlMs === undefined ? {} : { idleTtlMs }),
+			...(maxLifetimeMs === undefined ? {} : { maxLifetimeMs }),
 		};
 	}
 
@@ -383,6 +405,10 @@ export function loadConfig(path: string): AppConfig {
 			maxInputChars: r.number(limits.maxInputChars, "limits.maxInputChars", 32_000),
 			maxBodyBytes: r.number(limits.maxBodyBytes, "limits.maxBodyBytes", 1_000_000),
 			maxSubagentsPerSession: r.number(limits.maxSubagentsPerSession, "limits.maxSubagentsPerSession", 3),
+			maxBackgroundRunsPerUser: r.number(limits.maxBackgroundRunsPerUser, "limits.maxBackgroundRunsPerUser", 3),
+			maxTasksPerSession: r.number(limits.maxTasksPerSession, "limits.maxTasksPerSession", 5),
+			maxUnattendedRuns: r.number(limits.maxUnattendedRuns, "limits.maxUnattendedRuns", 10),
+			maxUnattendedTokens: r.number(limits.maxUnattendedTokens, "limits.maxUnattendedTokens", 1_000_000),
 		},
 		...(mcpEndpoint === undefined ? {} : { mcpEndpoint }),
 		http: {

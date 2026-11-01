@@ -13,13 +13,14 @@ const redact = (text: string) => text.replace(new RegExp(CARD, "g"), "[card numb
 export const guardrails = definePlugin({
 	name: "guardrails",
 	beforePrompt: (turn) => {
-		if (!CARD.test(turn.text)) return undefined;
+		const inNote = turn.note !== undefined && CARD.test(turn.note);
+		if (!CARD.test(turn.text) && !inNote) return undefined;
 		const input: UserInput =
 			typeof turn.input === "string"
 				? redact(turn.input)
 				: turn.input.map((block) => (block.type === "text" ? { ...block, text: redact(block.text) } : block));
 		turn.log.info("guardrails.redacted", { sessionId: turn.sessionId });
-		return { input };
+		return { input, ...(inNote ? { note: redact(turn.note!) } : {}) };
 	},
 	afterToolCall: (_call, result): ToolExecutionResult | undefined => {
 		if (result.output === undefined) return undefined;

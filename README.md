@@ -130,12 +130,14 @@ The session is named by the `Agent-Session-Id` header or `params.sessionId`.
 | Method | Params | Result |
 |---|---|---|
 | `session.create` | `profile?`, `metadata?` | `{ sessionId, profile, createdAt }` |
-| `session.list` | | `{ sessions }` |
-| `session.get` | | `{ sessionId, profile, busy, parked, activeTools, usage }` |
+| `session.list` | `archived?`, `limit?` (1-200), `cursor?` | `{ sessions, nextCursor? }`, most recently active first. Each has `lastActiveAt`, `busy`, and `archived` when set. Without `limit`, every session |
+| `session.messages` | `limit?` (1-200, default 50), `cursor?` | `{ messages, nextCursor? }`, oldest first, the newest page first. A `user` line has `text`, `images?`, and `turnId?` and `requestId?` for the newest 200 inputs; an `assistant` line has `text`, `stopReason`, `error?`, `source?`; a `tool` line has `callId`, `name`, `isError`, with no result; a `task` line, what a background task told the session, has `kind` (`report` or `note`), `taskId`, `name`, `status?`, `text`; a `compaction` line marks a summary. Readable while archived |
+| `session.update` | `title?`, `pinned?`, `archived?` | The session's info. `title` and `pinned` go in `metadata`. An archived session stays readable, doesn't count against `maxSessionsPerUser`, and refuses input with `session_archived` until restored. Archiving stops the current run and ends the session's background tasks |
+| `session.get` | | `{ sessionId, profile, busy, parked, activeTools, usage, subagents, tasks, taskUsage }`: `taskUsage` is what background tasks spent, on top of `usage` |
 | `session.prompt` | `input`, `requestId?`, `turnId?`, `whenBusy?` (`followUp`, `steer`, `reject`), `wait?`, `abortOnDisconnect?` | `{ turnId, submissionId, status, reason?, detail?, text? }`, or `{ turnId, status: "done", answeredBy, text, placement }` when a plugin answered (`placement: "queued"` when the session was busy) |
 | `session.steer` | `input`, `requestId?`, `turnId?` | `{ turnId, submissionId, placement }` |
 | `session.interrupt` | `input?`, `requestId?`, `turnId?`, `duringTools?` (`abort`, `steer`) | like `session.prompt`, or `{ aborted: true }` |
-| `session.cancel` | | `{ aborted: true }` |
+| `session.cancel` | `tasks?` (also end background tasks) | `{ aborted: true }` |
 | `session.retry` | | `{ retried }`: runs tasks parked after repeated crashes again |
 | `session.close` | | `{ closed: true }` |
 | `skills.list` | | `{ skills }` |
@@ -171,7 +173,7 @@ Events arrive as `{"jsonrpc":"2.0","method":"session/event","params":{ sessionId
 
 | `type` | Fields | Use |
 |---|---|---|
-| `snapshot` | `busy`, `activeTools`, `inbox` | State when a GET stream starts without a resumable id |
+| `snapshot` | `busy`, `activeTools`, `inbox`, `tasks` | State when a GET stream starts without a resumable id |
 | `run.started` / `run.finished` | `submissionIds` | |
 | `text.delta` | `text` | Chat UI |
 | `speech` | `text`, `index` | TTS: a complete, markdown-free sentence |
@@ -179,6 +181,7 @@ Events arrive as `{"jsonrpc":"2.0","method":"session/event","params":{ sessionId
 | `message.end` | `text`, `stopReason`, `error?`, `source?` | `source`: the plugin that wrote it without the model |
 | `tool.started` / `tool.finished` | `callId`, `name`, `isError` | Play a filler phrase; show progress |
 | `tools.active` | `names` | The offered tool set changed |
+| `task.updated` | `taskId`, `name`, `status` | A background task started or changed status |
 | `inbox` | `items` | Queued steers and follow-ups |
 | `submission` | `submissionId`, `status`, `reason?`, `detail?` | |
 | `retry`, `compaction`, `error` | | |

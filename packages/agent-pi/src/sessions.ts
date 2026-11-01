@@ -7,10 +7,17 @@ import { ownerKey, type Principal } from "./auth/authenticator.ts";
 import type { StoredGrant } from "./auth/grants.ts";
 import { AppError, RPC, rateLimited, sessionNotFound } from "./errors.ts";
 
+/** Fields of a session its owner can change after creation. */
+export type SessionChanges = { readonly title?: string; readonly pinned?: boolean; readonly archived?: boolean };
+
+export type SessionPage = { readonly sessions: readonly SessionInfo[]; readonly nextCursor?: string };
+
 export type SessionInfo = {
 	readonly sessionId: string;
 	readonly profile: string;
 	readonly createdAt: number;
+	readonly lastActiveAt: number;
+	readonly archived?: true;
 	readonly metadata?: JsonObject;
 };
 
@@ -96,7 +103,7 @@ export class SessionStore {
 					if (!transient) {
 						const sessions = await tx.doc(UserSessionsDoc, owner, null);
 						if (sessions.sessions.length >= this.#maxPerUser) {
-							throw rateLimited(`at most ${this.#maxPerUser} open sessions per user; close one first`, 1);
+							throw rateLimited(`at most ${this.#maxPerUser} open sessions per user; archive or close one first`, 1);
 						}
 						sessions.sessions.push(id);
 					}
@@ -107,6 +114,8 @@ export class SessionStore {
 					if (principal.tenantId !== undefined) session.tenantId = principal.tenantId;
 					session.profile = profile.name;
 					session.createdAt = Date.now();
+					session.lastActiveAt = session.createdAt;
+					if (transient) session.transient = true;
 					if (metadata !== undefined) session.metadata = metadata;
 					// The exact offered set; unset would offer every installed tool, hundreds of them.
 					(await tx.doc(AgentDoc, id)).tools = [...pinnedTools];
@@ -120,15 +129,71 @@ export class SessionStore {
 		return { conversation, sessionId: this.publicId(conversation.id) };
 	}
 
-	async list(principal: Principal, context: Context): Promise<SessionInfo[]> {
+	/** The caller's sessions, most recently active first. The cursor is an offset, so activity can shift a later page by one. */
+	async list(
+		principal: Principal,
+		options: { readonly archived?: boolean; readonly limit?: number; readonly cursor?: number },
+		context: Context,
+	): Promise<SessionPage> {
 		const index = await this.#harness.snapshot(UserSessionsDoc, ownerKey(principal), context);
-		const infos: SessionInfo[] = [];
-		for (const id of index?.sessions ?? []) {
+		const ids = [...((options.archived === true ? index?.archived : index?.sessions) ?? [])].reverse();
+		const start = options.cursor ?? 0;
+		const end = options.limit === undefined ? ids.length : Math.min(ids.length, start + options.limit);
+		const sessions: SessionInfo[] = [];
+		for (const id of ids.slice(start, end)) {
 			const session = await this.#harness.snapshot(SessionDoc, id as ConversationId, context);
 			if (session === undefined || session.closed === true) continue;
-			infos.push(this.info(id as ConversationId, session));
+			sessions.push(this.info(id as ConversationId, session));
 		}
-		return infos;
+		return { sessions, ...(end < ids.length ? { nextCursor: String(end) } : {}) };
+	}
+
+	/** Note new input: the session moves to the top of its owner's list. */
+	async touch(principal: Principal, conversationId: ConversationId, context: Context): Promise<void> {
+		await this.#harness.commit(async (tx) => {
+			const session = await tx.doc(SessionDoc, conversationId);
+			session.lastActiveAt = Date.now();
+			if (session.transient === true || session.parent !== undefined) return;
+			const index = await tx.doc(UserSessionsDoc, ownerKey(principal), null);
+			const at = index.sessions.indexOf(conversationId);
+			if (at === -1 || at === index.sessions.length - 1) return;
+			index.sessions.splice(at, 1);
+			index.sessions.push(conversationId);
+		}, context);
+	}
+
+	async update(principal: Principal, sessionId: string, changes: SessionChanges, context: Context): Promise<SessionInfo> {
+		const { conversation } = await this.require(principal, sessionId, context);
+		const owner = ownerKey(principal);
+		await this.#harness.commit(async (tx) => {
+			const session = await tx.doc(SessionDoc, conversation.id);
+			if (changes.title !== undefined || changes.pinned !== undefined) {
+				// Copied out first: a document's nested values are live views, and can't be spread back into it.
+				session.metadata = {
+					...(JSON.parse(JSON.stringify(session.metadata ?? {})) as JsonObject),
+					...(changes.title === undefined ? {} : { title: changes.title }),
+					...(changes.pinned === undefined ? {} : { pinned: changes.pinned }),
+				};
+			}
+			if (changes.archived !== undefined && changes.archived !== (session.archived === true)) {
+				const index = await tx.doc(UserSessionsDoc, owner, null);
+				const open = index.sessions.filter((id) => id !== conversation.id);
+				const archived = (index.archived ?? []).filter((id) => id !== conversation.id);
+				if (changes.archived) {
+					archived.push(conversation.id);
+					session.archived = true;
+				} else {
+					if (open.length >= this.#maxPerUser) throw rateLimited(`at most ${this.#maxPerUser} open sessions per user; archive one first`, 1);
+					open.push(conversation.id);
+					delete session.archived;
+				}
+				index.sessions = open;
+				index.archived = archived;
+			}
+		}, context);
+		const updated = await this.#harness.snapshot(SessionDoc, conversation.id, context);
+		if (updated === undefined) throw sessionNotFound();
+		return this.info(conversation.id, updated);
 	}
 
 	/** The caller's open session, or `session_not_found`. */
@@ -184,6 +249,7 @@ export class SessionStore {
 			const index = await tx.doc(UserSessionsDoc, ownerKey(principal), null);
 			const at = index.sessions.indexOf(conversationId);
 			if (at !== -1) index.sessions.splice(at, 1);
+			if (index.archived !== undefined) index.archived = index.archived.filter((id) => id !== conversationId);
 		}, context);
 	}
 
@@ -192,6 +258,8 @@ export class SessionStore {
 			sessionId: this.publicId(conversationId),
 			profile: session.profile,
 			createdAt: session.createdAt,
+			lastActiveAt: session.lastActiveAt ?? session.createdAt,
+			...(session.archived === true ? { archived: true as const } : {}),
 			...(session.metadata === undefined ? {} : { metadata: session.metadata }),
 		};
 	}

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Context } from "@earendil-works/chord";
+import type { Usage } from "@earendil-works/pi-ai";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import {
 	AgentDoc,
@@ -7,33 +8,38 @@ import {
 	type Conversation,
 	ConversationBusy,
 	type ConversationId,
+	type EntryId,
 	type Harness,
 	type JsonObject,
 	LiveDoc,
 	type Submission,
+	type SubmissionId,
 	type SubmissionRecord,
 	UsageDoc,
 	type UserInput,
 } from "@earendil-works/pi-durable";
 import { assistantText } from "./agent/subagents.ts";
 import { SessionDoc, type SessionState, ToolStateDoc } from "./agent/docs.ts";
+import { TasksDoc, taskUsage, tokensSpent } from "./agent/tasks.ts";
 import { pinnedTools, preloadTools, type Profile } from "./agent/profiles.ts";
 import { parkedTasks } from "./agent/parked.ts";
 import { ownerKey, type Principal } from "./auth/authenticator.ts";
 import type { CredentialStore } from "./auth/credentials.ts";
 import { type GrantBroker, GrantError, type StoredGrant } from "./auth/grants.ts";
 import type { LimitsConfig } from "./config.ts";
-import { AppError, invalidParams, RPC, rateLimited } from "./errors.ts";
+import { AppError, invalidParams, RPC } from "./errors.ts";
 import type { HubRegistry, SessionHub } from "./events/hub.ts";
 import type { ClientEventBody } from "./events/mapper.ts";
-import { currentTurnRecord, recordTurn } from "./identity.ts";
+import { recordedTurns, recordTurn, workTurn } from "./identity.ts";
 import { toolSpans } from "./events/tool-spans.ts";
 import { appendReply, type ReplyRecord, ReplyRequestsDoc } from "./plugins/history.ts";
 import { type PluginRunner, textOf } from "./plugins/runner.ts";
 import type { AgentPlugin, SessionContext } from "./plugins/types.ts";
-import type { SessionInfo, SessionStore } from "./sessions.ts";
+import type { RunTracker } from "./runs.ts";
+import type { SessionChanges, SessionInfo, SessionPage, SessionStore } from "./sessions.ts";
 import type { Skill } from "./skills/skills.ts";
 import { activateTools, refreshSkills } from "./tools/activation.ts";
+import { type TranscriptMessage, transcriptOf, withNote } from "./transcript.ts";
 import type { ToolCatalog } from "./tools/catalog.ts";
 import type { Logger } from "./util/log.ts";
 import { startSpan, traceIdOf, type TraceSpan } from "./util/tracing.ts";
@@ -49,6 +55,7 @@ export type ServiceDeps = {
 	readonly grants?: GrantBroker;
 	readonly hubs: HubRegistry;
 	readonly plugins: PluginRunner;
+	readonly runs: RunTracker;
 	readonly limits: LimitsConfig;
 	readonly log: Logger;
 };
@@ -66,6 +73,11 @@ export type PromptOptions = {
 	 * tool may already have acted, and an aborted one is reported to the model as if it had not.
 	 */
 	readonly duringTools?: "abort" | "steer";
+	/**
+	 * For the model on this turn, and left out of the transcript. A voice client says here that the reply is spoken, or
+	 * what was heard of the last one, without either showing as something the person said.
+	 */
+	readonly note?: string;
 };
 
 export type TaskOptions = Pick<PromptOptions, "turnId" | "traceparent"> & {
@@ -110,6 +122,21 @@ export type SessionDetails = SessionInfo & {
 	readonly parent?: string;
 	/** This session's newest child conversations, which `session.get` and the event stream can read. */
 	readonly subagents: readonly string[];
+	/** This session's background tasks. */
+	readonly tasks: readonly SessionTask[];
+	/** What background tasks spent. It is not in `usage`, unlike a foreground child's: add the two for the session's total. */
+	readonly taskUsage: Usage;
+};
+
+export type SessionTask = {
+	readonly taskId: string;
+	readonly name: string;
+	readonly status: string;
+	/** The child's id, for `session.get` and the event stream. */
+	readonly subagent?: string;
+	readonly startedAt: number;
+	readonly activeAt: number;
+	readonly usage?: Usage;
 };
 
 /**
@@ -118,7 +145,6 @@ export type SessionDetails = SessionInfo & {
  */
 export class AgentService {
 	readonly #deps: ServiceDeps;
-	readonly #runs = new RunTracker();
 
 	constructor(deps: ServiceDeps) {
 		this.#deps = deps;
@@ -150,18 +176,82 @@ export class AgentService {
 		return this.#deps.store.info(conversation.id, session);
 	}
 
-	listSessions(principal: Principal, context: Context): Promise<SessionInfo[]> {
-		return this.#deps.store.list(principal, context);
+	async listSessions(
+		principal: Principal,
+		options: { readonly archived?: boolean; readonly limit?: number; readonly cursor?: number },
+		context: Context,
+	): Promise<SessionPage & { readonly sessions: readonly (SessionInfo & { readonly busy: boolean })[] }> {
+		const { store, harness } = this.#deps;
+		const page = await store.list(principal, options, context);
+		const sessions = await Promise.all(
+			page.sessions.map(async (info) => {
+				const live = await harness.snapshot(LiveDoc, store.parseId(info.sessionId), context);
+				return { ...info, busy: live?.run !== undefined };
+			}),
+		);
+		return { ...page, sessions };
+	}
+
+	async updateSession(principal: Principal, sessionId: string, changes: SessionChanges, context: Context): Promise<SessionInfo> {
+		const info = await this.#deps.store.update(principal, sessionId, changes, context);
+		if (changes.archived === true) {
+			// Out of the way means nothing still spending. Archived first, so nothing new starts while these stop.
+			const conversation = await this.#deps.harness.conversation(this.#deps.store.parseId(sessionId), context);
+			await conversation?.abort(context, { background: true });
+		}
+		return info;
+	}
+
+	/**
+	 * A page of the transcript, oldest first, ending before the entry `before`. The first page is the newest. A session
+	 * stays readable while archived, and tools' results are left out.
+	 */
+	async messages(
+		principal: Principal,
+		sessionId: string,
+		options: { readonly before?: number; readonly limit: number },
+		context: Context,
+	): Promise<{ readonly messages: readonly TranscriptMessage[]; readonly nextCursor?: string }> {
+		const { conversation } = await this.#deps.store.readable(principal, sessionId, context);
+		const inputs = await this.#inputs(conversation.id, context);
+		const query = { order: "descending" as const, ...(options.before === undefined ? {} : { maxEntryId: (options.before - 1) as EntryId }) };
+		const messages: TranscriptMessage[] = [];
+		let oldest = options.before;
+		let cursor: Awaited<ReturnType<Conversation["entries"]>>["next"];
+		// Most entries show nothing, so a page of entries can come up short.
+		do {
+			const page = await conversation.entries(query, options.limit, cursor, context);
+			for (const entry of page.items) {
+				oldest = entry.id;
+				messages.unshift(...transcriptOf(entry, inputs));
+			}
+			cursor = page.next;
+		} while (cursor !== undefined && messages.length < options.limit);
+		return { messages, ...(cursor === undefined ? {} : { nextCursor: String(oldest) }) };
+	}
+
+	/** Which turn and request wrote each user entry. Turns are kept for the newest inputs only. */
+	async #inputs(conversationId: ConversationId, context: Context): Promise<Map<number, { turnId: string; requestId?: string }>> {
+		const inputs = new Map<number, { turnId: string; requestId?: string }>();
+		for (const [id, turnId] of await recordedTurns(this.#deps.harness, conversationId, context)) {
+			const submission = await this.#deps.harness.submission(id as SubmissionId, context);
+			const record = await submission?.status(context);
+			if (record?.entry === undefined) continue;
+			inputs.set(record.entry, { turnId, ...(record.requestId === undefined ? {} : { requestId: record.requestId }) });
+		}
+		return inputs;
 	}
 
 	async getSession(principal: Principal, sessionId: string, context: Context): Promise<SessionDetails> {
 		const { store } = this.#deps;
 		const { conversation, session } = await store.readable(principal, sessionId, context);
-		const [agent, live, usage] = await Promise.all([
+		const [agent, live, usage, tasks] = await Promise.all([
 			this.#deps.harness.snapshot(AgentDoc, conversation.id, context),
 			this.#deps.harness.snapshot(LiveDoc, conversation.id, context),
 			this.#deps.harness.snapshot(UsageDoc, conversation.id, context),
+			this.#deps.harness.snapshot(TasksDoc, conversation.id, context),
 		]);
+		const spent = await taskUsage(this.#deps.harness, tasks ?? { tasks: [] }, context);
 		return {
 			...this.#deps.store.info(conversation.id, session),
 			busy: live?.run !== undefined,
@@ -170,6 +260,16 @@ export class AgentService {
 			usage: (usage ?? {}) as JsonObject,
 			...(session.parent === undefined ? {} : { parent: store.publicId(session.parent as ConversationId) }),
 			subagents: (session.subagents ?? []).map((id) => store.publicId(id as ConversationId)),
+			tasks: (tasks?.tasks ?? []).map((task) => ({
+				taskId: task.id,
+				name: task.name,
+				status: task.status,
+				...(task.child === undefined ? {} : { subagent: store.publicId(task.child as ConversationId) }),
+				startedAt: task.startedAt,
+				activeAt: task.activeAt,
+				...(spent.byTask.has(task.id) ? { usage: spent.byTask.get(task.id)! } : {}),
+			})),
+			taskUsage: spent.total,
 		};
 	}
 
@@ -245,20 +345,47 @@ export class AgentService {
 	): Promise<Admitted> {
 		const content = this.#input(input);
 		const { conversation, session } = await this.#deps.store.require(principal, sessionId, context);
+		this.#admissible(session, options.note);
 		const profile = this.#profile(session.profile);
 		this.#deps.credentials.set(conversation.id, principal);
 		await this.#attachGrant(conversation.id, session, principal, context);
-		const lease = this.#runs.reserve(ownerKey(principal), conversation.id, this.#deps.limits);
+		const lease = this.#deps.runs.reserve(ownerKey(principal), conversation.id, this.#deps.limits);
+		let admitted: Admitted;
 		try {
-			const admitted = await this.#admit(conversation, session, principal, profile, sessionId, content, options, context);
+			await this.#attended(conversation, context);
+			admitted = await this.#admit(conversation, session, principal, profile, sessionId, content, options, context);
 			if (admitted.kind === "run") lease.track(admitted.submission);
 			else lease.release();
-			return admitted;
 		} catch (error) {
 			lease.release();
 			if (error instanceof ConversationBusy) throw new AppError("busy", 409, RPC.busy, "session is busy");
 			throw error;
 		}
+		// Only the order of the session list. The input is in, so a failure here must not read as its failure.
+		await this.#deps.store.touch(principal, conversation.id, context).catch((error: unknown) => {
+			this.#deps.log.warn("session.touch_failed", { sessionId, error: String(error) });
+		});
+		return admitted;
+	}
+
+	/** Why this session cannot take this input, if it can't. Checked before anything is stopped to make way for it. */
+	#admissible(session: Readonly<SessionState>, note: string | undefined): void {
+		if (note !== undefined && note.length > this.#deps.limits.maxInputChars) {
+			throw invalidParams(`note is longer than ${this.#deps.limits.maxInputChars} characters`);
+		}
+		if (session.archived === true) throw new AppError("session_archived", 409, RPC.rejected, "session is archived; restore it first");
+	}
+
+	/** Someone is here, so the session's background tasks may wake it again, and idle ones can be answered. */
+	async #attended(conversation: Conversation, context: Context): Promise<void> {
+		const tasks = await this.#deps.harness.snapshot(TasksDoc, conversation.id, context);
+		if (tasks === undefined || tasks.nextId === 1) return;
+		const attendedTokens = await tokensSpent(this.#deps.harness, conversation.id, tasks, context);
+		await conversation.commit(async (tx) => {
+			const state = await tx.doc(TasksDoc, conversation.id);
+			Object.assign(state, { unattended: 0, attendedTokens });
+			for (const task of state.tasks) if (task.status !== "working" && task.heardAt === undefined) task.heardAt = Date.now();
+		}, context);
 	}
 
 	async #admit(
@@ -281,8 +408,8 @@ export class AgentService {
 		}
 		const outcome =
 			earlier?.kind === "run"
-				? ({ kind: "model", input: content, activate: [] } as const)
-				: await this.#deps.plugins.beforePrompt(conversation.id, session, principal, content, requestId, turnId, context);
+				? ({ kind: "model", input: content, note: options.note, activate: [] } as const)
+				: await this.#deps.plugins.beforePrompt(conversation.id, session, principal, content, options.note, requestId, turnId, context);
 		if (outcome.kind === "reply") {
 			const reply = await appendReply(
 				this.#deps.harness,
@@ -298,7 +425,7 @@ export class AgentService {
 			}
 			return { kind: "reply", conversationId: conversation.id, profile, turnId: reply.turnId, text: reply.text, plugin: reply.plugin, placement: reply.placement };
 		}
-		const submitted = outcome.input;
+		const { input: submitted, note } = outcome;
 
 		// Loaded skills pick up tools listed since they loaded; then the input's likely tools are preloaded, after the
 		// tools plugins routed this input to. A retry skips this: its input is already in the transcript.
@@ -329,7 +456,7 @@ export class AgentService {
 			const submission = await conversation.submit(
 				{
 					type: "input",
-					content: submitted,
+					content: note === undefined ? submitted : withNote(submitted, note),
 					whenBusy: options.whenBusy ?? "followUp",
 					...(requestId === undefined ? {} : { requestId }),
 				},
@@ -394,17 +521,19 @@ export class AgentService {
 		principal: Principal,
 		sessionId: string,
 		input: unknown,
-		ids: Pick<PromptOptions, "requestId" | "turnId" | "traceparent" | "duringTools">,
+		ids: Pick<PromptOptions, "requestId" | "turnId" | "traceparent" | "duringTools" | "note">,
 		context: Context,
 	): Promise<Admitted | undefined> {
-		const { requestId, turnId, traceparent } = ids;
+		const { requestId, turnId, traceparent, note } = ids;
 		const prompted = {
 			...(requestId === undefined ? {} : { requestId }),
 			...(turnId === undefined ? {} : { turnId }),
 			...(traceparent === undefined ? {} : { traceparent }),
+			...(note === undefined ? {} : { note }),
 		};
 		if (input !== undefined) this.#input(input);
-		const { conversation } = await this.#deps.store.require(principal, sessionId, context);
+		const { conversation, session } = await this.#deps.store.require(principal, sessionId, context);
+		if (input !== undefined) this.#admissible(session, note);
 		// A retry must not abort again: that would stop the run its first attempt started. `prompt` returns that outcome.
 		const retry = requestId !== undefined && (await this.#earlier(conversation, requestId, context)) !== undefined;
 		if (!retry) {
@@ -418,9 +547,10 @@ export class AgentService {
 		return this.prompt(principal, sessionId, input, prompted, context);
 	}
 
-	async cancel(principal: Principal, sessionId: string, context: Context): Promise<void> {
+	/** Stop the run. Background tasks go on, unless `tasks` says to end them too. */
+	async cancel(principal: Principal, sessionId: string, context: Context, options: { readonly tasks?: boolean } = {}): Promise<void> {
 		const { conversation } = await this.#deps.store.require(principal, sessionId, context);
-		await conversation.abort(context);
+		await conversation.abort(context, { background: options.tasks === true });
 	}
 
 	/** Run the session's tasks the crash-loop guard parked again. Each may be cut off `restartLimit` more times. */
@@ -436,7 +566,7 @@ export class AgentService {
 		const { conversation, session } = await this.#deps.store.require(principal, sessionId, context);
 		// Closed first, so a prompt arriving while the run aborts and plugins clean up is refused, not started.
 		await this.#deps.store.markClosed(principal, conversation.id, context);
-		await conversation.abort(context);
+		await conversation.abort(context, { background: true });
 		await this.#deps.plugins.sessionClosed(conversation.id, session, context);
 		await this.#deps.hubs.stop(conversation.id);
 		this.#deps.credentials.delete(conversation.id);
@@ -449,20 +579,29 @@ export class AgentService {
 		const { conversation, session } = await this.#deps.store.readable(principal, sessionId, context);
 		const child = session.parent !== undefined;
 		if (!child) this.#deps.credentials.set(conversation.id, principal);
+		// A hub can only watch a document that exists, and this one may not until the first task.
+		if (!child && (await this.#deps.harness.snapshot(TasksDoc, conversation.id, context)) === undefined) {
+			await conversation.commit(async (tx) => {
+				await tx.doc(TasksDoc, conversation.id);
+			}, context);
+		}
 		const profile = this.#profile(session.profile);
 		const transform = this.#deps.plugins.eventMapper({ sessionId, profile });
-		const owner = (session.parent as ConversationId | undefined) ?? conversation.id;
 		return this.#deps.hubs.get(conversation.id, {
 			speech: profile.speech && !child,
 			thinking: profile.thinkingEvents,
 			...(transform === undefined ? {} : { transform }),
-			observe: toolSpans(async () => (await currentTurnRecord(this.#deps.harness, owner, BACKGROUND_CONTEXT))?.traceparent),
+			observe: toolSpans(async () => {
+				// Read each time: a child's turn changes with each `task_send`.
+				const current = await this.#deps.harness.snapshot(SessionDoc, conversation.id, BACKGROUND_CONTEXT);
+				return (await workTurn(this.#deps.harness, conversation.id, current, BACKGROUND_CONTEXT))?.traceparent;
+			}),
 		});
 	}
 
 	/** Whether the session has an unsettled input, so its caller's credentials are still needed. */
 	isWorking(conversationId: ConversationId): boolean {
-		return this.#runs.isWorking(conversationId);
+		return this.#deps.runs.isWorking(conversationId);
 	}
 
 	/** A plugin's JSON-RPC method. */
@@ -483,6 +622,11 @@ export class AgentService {
 		const conversation = await this.#deps.harness.conversation(conversationId, BACKGROUND_CONTEXT);
 		const entry = await conversation?.commit((tx) => tx.entry(AssistantEntry, settled.answer), BACKGROUND_CONTEXT);
 		return assistantText(entry?.model?.[0]);
+	}
+
+	/** A background task started a run. Plugins see it as they see a prompted one; a crash can show it to them twice. */
+	woken(conversationId: ConversationId, session: Readonly<SessionState>, submission: Submission, turnId: string): void {
+		this.#afterRun(conversationId, session, submission, turnId);
 	}
 
 	#afterRun(conversationId: ConversationId, session: Readonly<SessionState>, submission: Submission, turnId: string): void {
@@ -540,57 +684,5 @@ export class AgentService {
 		}
 		if (chars > max) throw invalidParams(`input is longer than ${max} characters`);
 		return blocks;
-	}
-}
-
-/** A reserved run slot: `track` holds it until the submission settles, `release` frees it at once. Both are idempotent. */
-type RunLease = { track(submission: Submission): void; release(): void };
-
-/**
- * Concurrency limits in memory: per owner, the sessions with an unsettled input. A follow-up into a session that is
- * already working adds no concurrency, so it is never refused. A slot is reserved before any await, so concurrent
- * prompts cannot all pass the check before one of them is counted.
- */
-class RunTracker {
-	readonly #byOwner = new Map<string, Map<ConversationId, number>>();
-	#total = 0;
-
-	reserve(owner: string, conversationId: ConversationId, limits: LimitsConfig): RunLease {
-		const sessions = this.#byOwner.get(owner) ?? new Map<ConversationId, number>();
-		const pending = sessions.get(conversationId);
-		if (pending === undefined) {
-			if (sessions.size >= limits.maxConcurrentRunsPerUser) {
-				throw rateLimited(`at most ${limits.maxConcurrentRunsPerUser} sessions per user may work at once`, 2);
-			}
-			if (this.#total >= limits.maxConcurrentRuns) throw rateLimited("the server is at capacity", 2);
-			this.#total++;
-		}
-		sessions.set(conversationId, (pending ?? 0) + 1);
-		this.#byOwner.set(owner, sessions);
-
-		let released = false;
-		const release = () => {
-			if (released) return;
-			released = true;
-			const left = (sessions.get(conversationId) ?? 1) - 1;
-			if (left > 0) {
-				sessions.set(conversationId, left);
-				return;
-			}
-			sessions.delete(conversationId);
-			this.#total--;
-			if (sessions.size === 0 && this.#byOwner.get(owner) === sessions) this.#byOwner.delete(owner);
-		};
-		return {
-			release,
-			track: (submission) => {
-				void submission.wait(BACKGROUND_CONTEXT).catch(() => undefined).finally(release);
-			},
-		};
-	}
-
-	isWorking(conversationId: ConversationId): boolean {
-		for (const sessions of this.#byOwner.values()) if (sessions.has(conversationId)) return true;
-		return false;
 	}
 }

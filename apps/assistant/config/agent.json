@@ -79,7 +79,8 @@
 	},
 	"mcpServers": [],
 	"limits": {
-		"maxSessionsPerUser": "${MAX_SESSIONS_PER_USER:-20}",
+		"maxSessionsPerUser": "${MAX_SESSIONS_PER_USER:-200}",
+		"maxBodyBytes": "${MAX_BODY_BYTES:-16000000}",
 		"maxConcurrentRunsPerUser": "${MAX_RUNS_PER_USER:-3}",
 		"maxConcurrentRuns": "${MAX_RUNS:-200}"
 	},

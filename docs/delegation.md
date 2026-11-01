@@ -76,6 +76,9 @@ Sub-agents are declared at the top level of the agent's config. The model picks 
 | `instructionsFile` | none | The child's instructions |
 | `tools` | `[]` | The exact starting tool set: catalog patterns, plus `load_skill` and `search_tools` by name. Empty means no tools |
 | `timeoutMs` | 300000 | The child is aborted after this long, and the tool reports it. The timer restarts on a rerun. `consult_expert` has none |
+| `background` | `false` | Return at once, and report when the child's turn ends. See [async-tasks.md](async-tasks.md) |
+| `idleTtlMs` | 600000 | With `background`: how long the child may wait for a reply, from the first user input after it stopped |
+| `maxLifetimeMs` | 3600000 | With `background`: how long the task may live |
 
 Each becomes a catalog tool `agent_<name>`, with the one parameter `task`. Being in the catalog means skills, search,
 preload, and `alwaysOnTools` reach it the way they reach any tool; a profile offers one with
@@ -98,7 +101,7 @@ tool. Leave it out to fix the set. Grants are the boundary.
   the parent's `pi.usage`. A child's own `session.get` shows the same spend; do not add the two together.
 - **Foreground only.** The parent's tool call waits for the child. A steer waits for that tool round, and a barge-in
   aborts the child, as with any tool. `duringTools: "steer"` waits for it to finish. Prefer short timeouts on voice
-  profiles. Durable's background pattern (its example 23) is the next step if this proves too limiting.
+  profiles. For work that should not hold the parent, set `"background": true`: see [async-tasks.md](async-tasks.md).
 - **`beforePrompt` does not run for a child.** The input comes from the calling model, not the user. Model and tool
   hooks do run. `afterRun` does not.
 

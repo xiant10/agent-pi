@@ -1,8 +1,9 @@
 import { randomBytes } from "node:crypto";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { type AgentEventStream, type ConversationId, type Harness, watchEvents } from "@earendil-works/pi-durable";
+import { TasksDoc } from "../agent/tasks.ts";
 import type { Logger } from "../util/log.ts";
-import { type ClientEventBody, EventMapper, type MapperOptions } from "./mapper.ts";
+import { type ClientEventBody, EventMapper, type MapperOptions, type TaskStatus } from "./mapper.ts";
 
 /** `id` is `<epoch>-<seq>`: the epoch changes whenever a hub is recreated, so a stale id never resumes wrongly. */
 export type ClientEvent = { readonly id: string; readonly body: ClientEventBody };
@@ -55,9 +56,12 @@ export class SessionHub {
 	#busy: boolean;
 	#activeTools: string[];
 	#inbox: { id: number; mode: string }[];
+	/** Durable's snapshots do not cover tasks, so the hub keeps them for its own. */
+	readonly #tasks = new Map<string, TaskStatus>();
 	#idleTimer: ReturnType<typeof setTimeout> | undefined;
 	#detachedSince: number | undefined;
 	#stopped = false;
+	#stopTasks: (() => Promise<unknown> | undefined) | undefined;
 
 	private constructor(
 		conversationId: ConversationId,
@@ -90,14 +94,27 @@ export class SessionHub {
 		const stream = await watchEvents(harness, conversationId, BACKGROUND_CONTEXT);
 		const hub = new SessionHub(conversationId, stream, new EventMapper(mapping), options, onStop);
 		const { transform, observe } = mapping;
+		const emit = (body: ClientEventBody) => {
+			observe?.(body);
+			// Snapshots carry the hub's own state; they are not for plugins to change.
+			if (body.type === "snapshot") hub.#publish({ ...body, tasks: [...hub.#tasks.values()] });
+			else if (transform === undefined) hub.#publish(body);
+			else for (const mapped of transform(body)) hub.#publish(mapped);
+		};
 		stream.start(async (events) => {
-			for (const event of events) {
-				for (const body of hub.#mapper.map(event)) {
-				observe?.(body);
-					// Snapshots carry the hub's own state; they are not for plugins to change.
-					if (transform === undefined || body.type === "snapshot") hub.#publish(body);
-					else for (const mapped of transform(body)) hub.#publish(mapped);
-				}
+			for (const event of events) for (const body of hub.#mapper.map(event)) emit(body);
+		});
+		// Absent for a session without the document, such as a child: it has no tasks to report.
+		const tasks = await harness.watchDoc(TasksDoc, conversationId, BACKGROUND_CONTEXT);
+		hub.#stopTasks = () => tasks?.stop();
+		for (const { id, name, status } of tasks?.value?.tasks ?? []) hub.#tasks.set(id, { taskId: id, name, status });
+		tasks?.start(async (state) => {
+			const current = state?.tasks ?? [];
+			for (const id of hub.#tasks.keys()) if (!current.some((task) => task.id === id)) hub.#tasks.delete(id);
+			for (const { id, name, status } of current) {
+				if (hub.#tasks.get(id)?.status === status) continue;
+				hub.#tasks.set(id, { taskId: id, name, status });
+				emit({ type: "task.updated", taskId: id, name, status });
 			}
 		});
 		void stream.closed.then(() => hub.stop()).catch((error: unknown) => {
@@ -140,6 +157,7 @@ export class SessionHub {
 		this.#onStop();
 		for (const subscriber of [...this.#subscribers]) subscriber.end();
 		this.#subscribers.clear();
+		await this.#stopTasks?.()?.catch(() => undefined);
 		await this.#stream.stop().catch(() => undefined);
 	}
 
@@ -175,7 +193,7 @@ export class SessionHub {
 		// Not buffered: it describes the moment of subscription, and its id lets the client resume from here.
 		return {
 			id: `${this.#epoch}-${this.#seq}`,
-			body: { type: "snapshot", busy: this.#busy, activeTools: [...this.#activeTools], inbox: [...this.#inbox] },
+			body: { type: "snapshot", busy: this.#busy, activeTools: [...this.#activeTools], inbox: [...this.#inbox], tasks: [...this.#tasks.values()] },
 		};
 	}
 

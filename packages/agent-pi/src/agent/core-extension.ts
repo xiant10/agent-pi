@@ -1,20 +1,26 @@
 import type { Context } from "@earendil-works/chord";
 import { Type } from "@earendil-works/pi-ai";
 import {
+	type ConversationId,
 	defineExtension,
 	defineTool,
 	type Extension,
+	type Harness,
 	type PromptSection,
 	section,
+	type Submission,
 	type ToolExecutionApi,
 	type ToolRegistration,
 } from "@earendil-works/pi-durable";
+import type { LimitsConfig } from "../config.ts";
+import type { RunTracker } from "../runs.ts";
 import { readSkillFile, renderSkillIndex, type Skill } from "../skills/skills.ts";
 import { activateSkill, activateTools } from "../tools/activation.ts";
 import type { ToolCatalog } from "../tools/catalog.ts";
-import { readSession } from "./docs.ts";
+import { readSession, type SessionState } from "./docs.ts";
 import { EXPERT_TOOL, pinnedTools, type Profile } from "./profiles.ts";
 import { type ChildDeps, runChild, type Subagent, subagentTool } from "./subagents.ts";
+import { backgroundTasks, CHILD_TASK_SECTION, PARENT_TASK_SECTION, PARENT_TASK_TOOLS } from "./tasks.ts";
 
 export const CORE_EXTENSION = "agent.core";
 export const INSTRUCTIONS_EXTENSION = "agent.instructions";
@@ -30,6 +36,10 @@ export type CoreDeps = ChildDeps & {
 	readonly profileOf: (name: string | undefined) => Profile;
 	readonly catalog: ToolCatalog;
 	readonly subagents: readonly Subagent[];
+	readonly limits: LimitsConfig;
+	readonly runs: RunTracker;
+	readonly harness: () => Harness;
+	readonly woken: (conversationId: ConversationId, session: Readonly<SessionState>, submission: Submission, turnId: string) => void;
 };
 
 const SEARCH_LIMIT = 8;
@@ -64,8 +74,19 @@ export function coreExtension(deps: CoreDeps): Extension {
 
 	const tools: ToolRegistration[] = [loadSkillTool(deps), searchToolsTool(deps)];
 	if ([...deps.profiles.values()].some((profile) => profile.expert !== undefined)) tools.push(expertTool(deps));
-	for (const subagent of deps.subagents) tools.push(subagentTool(subagent, deps.catalog, deps));
-	return defineExtension({ name: CORE_EXTENSION, sections, tools });
+	const background = backgroundTasks(deps);
+	for (const subagent of deps.subagents) tools.push(subagent.background === true ? background.tool(subagent) : subagentTool(subagent, deps.catalog, deps));
+	if (deps.subagents.some((subagent) => subagent.background === true)) {
+		tools.push(...background.tools);
+		sections.push(
+			section("tasks", async (input, context) => {
+				const session = await readSession(input.read, input.conversationId, context);
+				if (session?.parent === undefined) return PARENT_TASK_SECTION;
+				return session.task === undefined ? undefined : CHILD_TASK_SECTION;
+			}),
+		);
+	}
+	return defineExtension({ name: CORE_EXTENSION, sections, tools, tasks: background.tasks });
 }
 
 /** The profile of the session a tool runs in. */
@@ -176,7 +197,7 @@ function expertTool(deps: CoreDeps): ToolRegistration {
 					instructions:
 						"You are consulted by another assistant that is talking with a user. Think the problem through, then " +
 						"answer with the conclusion first and only the reasoning the assistant needs to relay it.",
-					tools: (inherited) => inherited.filter((name) => name !== EXPERT_TOOL),
+					tools: (inherited) => inherited.filter((name) => name !== EXPERT_TOOL && !PARENT_TASK_TOOLS.includes(name)),
 				},
 				args.question,
 				context,

@@ -10,6 +10,10 @@ export type SessionState = {
 	profile: string;
 	createdAt: number;
 	closed?: boolean;
+	/** Out of the owner's open sessions: still readable, not counted against their limit, and refuses new input. */
+	archived?: boolean;
+	/** The last input. Absent in older sessions, which fall back to `createdAt`. */
+	lastActiveAt?: number;
 	metadata?: JsonObject;
 	/** The agent grant tool calls run under. Safe to store: an id is useless without this runtime's credentials. */
 	grantId?: string;
@@ -19,6 +23,12 @@ export type SessionState = {
 	parent?: number;
 	/** The newest child conversations of this session. */
 	subagents?: number[];
+	/** Set on a background child: its id in the parent's `app.tasks`. */
+	task?: string;
+	/** Set on a background child: the turn that started it, since it outlives that turn. */
+	origin?: { turnId: string; traceparent?: string };
+	/** Lives for one call, so nothing could read a background task's report. */
+	transient?: boolean;
 } & JsonObject;
 
 export const SessionDoc = defineDoc<SessionState>({
@@ -46,8 +56,11 @@ export async function readSession(
 	return session === undefined || session.owner === "" ? undefined : session;
 }
 
-/** One document per owner, listing their open sessions. Per-owner, so listing and creating stay O(own sessions). */
-export const UserSessionsDoc = defineDocFamily<{ sessions: number[] } & JsonObject, null>({
+/**
+ * One document per owner, listing their sessions, least recently active first. Per-owner, so listing and creating stay
+ * O(own sessions). Only `sessions` counts against the owner's limit.
+ */
+export const UserSessionsDoc = defineDocFamily<{ sessions: number[]; archived?: number[] } & JsonObject, null>({
 	kind: "app.user-sessions",
 	version: 1,
 	family: true,

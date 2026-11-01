@@ -210,6 +210,15 @@ It becomes the catalog tool `agent_research`, which takes a `task`. Offer it lik
 client can read those ids with `session.get` and the `GET` event stream, but cannot drive them. The server name `agents`
 is reserved. See [delegation.md](delegation.md) for the design.
 
+With `"background": true`, the tool returns at once and the child reports when its turn ends, waking the parent if it is
+idle. The parent gets `task_send`, `task_list`, and `task_stop`, and the child `task_note`. `idleTtlMs` and
+`maxLifetimeMs` bound a task, `limits.maxBackgroundRunsPerUser` (default 3) bounds child runs per user, apart from
+`maxConcurrentRunsPerUser`, and `limits.maxTasksPerSession` (default 5), `limits.maxUnattendedRuns` (default 10), and
+`limits.maxUnattendedTokens` (default 1000000) bound a session. `session.get` gives what tasks spent as `taskUsage`, apart
+from `usage`. A profile with `"taskReports": "note"` holds reports for the next user input, as a voice agent may want.
+Clients read `tasks` from `session.get` and `task.updated` events; a woken run streams only to a `GET` stream, so a client
+that wants unprompted answers must hold one. See [async-tasks.md](async-tasks.md).
+
 ## Offering an agent over MCP
 
 An agent can offer itself to MCP clients and other agents. Set `mcpEndpoint`:
@@ -413,6 +422,8 @@ export const shortcuts = definePlugin({
   turns, and clients receive it like a model answer (`message.end` carries `source: "<plugin>"`). The result has
   `placement: "queued"` when the session was busy; the exchange then enters the transcript after the current run.
 - `{ input }` rewrites the input for later plugins and the model (redaction, normalization).
+- `{ note }` does the same for `turn.note`, what a client told the model about this turn. It is apart from `input` and
+  `text`, so it cannot trip a shortcut, but it reaches the model, so a plugin that filters input should filter it too.
 - The first `reply` or `reject` ends the chain.
 - A retried prompt with the same `requestId` gets the first outcome back, without running `beforePrompt` again. Side
   effects in `beforePrompt` therefore run once per `requestId`, but they do run for every distinct input; keep them

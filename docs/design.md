@@ -171,18 +171,20 @@ Methods:
 | `session.create` | `{ profile?, metadata? }` | `{ sessionId, profile }` (+ `Agent-Session-Id` header) |
 | `session.list` | `{}` | `{ sessions: [...] }` |
 | `session.get` | `{}` | `{ sessionId, profile, busy, activeTools, usage }` |
-| `session.prompt` | `{ input, requestId?, whenBusy? }` | `{ submissionId, status, text? }` |
+| `session.prompt` | `{ input, requestId?, whenBusy?, note? }` | `{ submissionId, status, text? }` |
 | `session.steer` | `{ input, requestId? }` | `{ submissionId, placement }` |
-| `session.interrupt` | `{ input?, requestId? }` | like `session.prompt`, or `{ aborted: true }` |
-| `session.cancel` | `{}` | `{ aborted: true }` |
+| `session.interrupt` | `{ input?, requestId?, duringTools?, note? }` | like `session.prompt`, or `{ aborted: true }` |
+| `session.cancel` | `{ tasks? }` | `{ aborted: true }` |
 | `session.retry` | `{}` | `{ retried }` |
 | `session.close` | `{}` | `{ closed: true }` |
 | `skills.list` | `{}` | `{ skills: [{ name, description }] }` |
 
+`note` is for the model on that turn and stays out of `session.messages`. A voice client on a chat session uses it to say the reply is spoken, and what was heard of a reply that was cut off.
+
 Client events (`session/event` notification `params`; the type is `ClientEventBody` in `events/mapper.ts`):
 
 ```
-snapshot        { busy, activeTools, inbox }     state when a GET stream starts without a resumable id
+snapshot        { busy, activeTools, inbox, tasks }   state when a GET stream starts without a resumable id
 run.started     { submissionIds }
 run.finished    { submissionIds }
 text.delta      { text }                         raw assistant text, for chat UIs
@@ -192,6 +194,7 @@ message.end     { text, stopReason, error?, source? }   source: the plugin that 
 tool.started    { callId, name }
 tool.finished   { callId, name, isError }
 tools.active    { names }                        the offered tool set changed (skill, search, preload, eviction)
+task.updated    { taskId, name, status }         a background task started or changed status
 inbox           { items }                        queued steers, follow-ups, and writes
 submission      { submissionId, status, reason?, detail? }
 retry           { attempt, at, error }           a model request is retried
@@ -356,6 +359,7 @@ Paths are under `packages/agent-pi/src/` unless noted.
 | Sessions and limits | `sessions.ts`, `service.ts` |
 | Durable wiring | `agent/core-extension.ts`, `docs.ts`, `profiles.ts`, `models.ts` |
 | Sub-agents | `agent/subagents.ts` |
+| Background tasks | `agent/tasks.ts` |
 | Tools | `tools/catalog.ts`, `activation.ts`, `mcp-extension.ts`, `mcp/manager.ts` |
 | Skills | `skills/skills.ts` |
 | Events and speech | `events/hub.ts`, `mapper.ts`, `speech.ts` |
