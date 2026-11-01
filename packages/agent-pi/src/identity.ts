@@ -54,13 +54,14 @@ export type IdentityHeaderResolver = (call: CallContext) => Readonly<Record<stri
 /** HTTP header carrying each field of a `CallIdentity`; omit a field to not send it. */
 export type IdentityHeaderNames = { readonly [Field in keyof CallIdentity]?: string };
 
-/** The header names of the Kaidan agent gateway's audit log. */
+/** The header names `ai-gateway` reads from a model call. */
 export const GATEWAY_IDENTITY_HEADERS: IdentityHeaderNames = {
 	agent: "X-Agent-Name",
 	sessionId: "X-Session-ID",
 	turnId: "X-Turn-ID",
 	userId: "X-User-Id",
 	userName: "X-User-Name",
+	tenantId: "X-Tenant-ID",
 };
 
 /** `_meta` keys of a `tools/call` between agents. */
