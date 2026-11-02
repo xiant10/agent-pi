@@ -274,7 +274,13 @@ export class AgentService {
 	}
 
 	/** Each user request opens or extends the session's grant. Only a change needs writing down. */
-	async #attachGrant(conversationId: ConversationId, session: Readonly<SessionState>, principal: Principal, context: Context): Promise<void> {
+	async #attachGrant(
+		conversationId: ConversationId,
+		session: Readonly<SessionState>,
+		principal: Principal,
+		context: Context,
+		traceparent?: string,
+	): Promise<void> {
 		const grants = this.#deps.grants;
 		if (grants === undefined) return;
 		const stored =
@@ -283,7 +289,7 @@ export class AgentService {
 				: { grantId: session.grantId, ...(session.grantParent === undefined ? {} : { parent: session.grantParent }) };
 		let grant: StoredGrant;
 		try {
-			grant = await grants.attach(conversationId, stored, principal);
+			grant = await grants.attach(conversationId, stored, principal, traceparent);
 		} catch (error) {
 			if (error instanceof GrantError && error.reason === "stopped") throw new AppError("grant_refused", 403, RPC.forbidden, error.message);
 			throw new AppError("auth_unavailable", 503, RPC.internal, error instanceof Error ? error.message : String(error));
@@ -348,7 +354,7 @@ export class AgentService {
 		this.#admissible(session, options.note);
 		const profile = this.#profile(session.profile);
 		this.#deps.credentials.set(conversation.id, principal);
-		await this.#attachGrant(conversation.id, session, principal, context);
+		await this.#attachGrant(conversation.id, session, principal, context, options.traceparent);
 		const lease = this.#deps.runs.reserve(ownerKey(principal), conversation.id, this.#deps.limits);
 		let admitted: Admitted;
 		try {

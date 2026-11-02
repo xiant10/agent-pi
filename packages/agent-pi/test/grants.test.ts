@@ -34,6 +34,7 @@ class FakeAuth {
 	readonly expired = new Set<string>();
 	mints = 0;
 	chainReads = 0;
+	readonly traces: string[] = [];
 	down = 0;
 	expiresIn = 300;
 	#next = 1;
@@ -61,6 +62,8 @@ class FakeAuth {
 			});
 		}
 		expect(new Headers(init?.headers).get("authorization")).toBe("Bearer service-token");
+		const trace = new Headers(init?.headers).get("traceparent");
+		if (trace !== null) this.traces.push(trace);
 		const path = /^\/v1\/grants\/([^/]+)\/(extend|revoke|chain)$/.exec(url.pathname);
 		if (path?.[2] === "chain") {
 			this.chainReads++;
@@ -97,6 +100,15 @@ function broker(auth: FakeAuth, now = Date.now) {
 }
 
 describe("GrantBroker", () => {
+	it("sends the turn's traceparent on the calls it makes for that turn", async () => {
+		const auth = new FakeAuth();
+		const grants = broker(auth);
+		const traceparent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+		const first = await grants.attach(CONVERSATION, undefined, user(), traceparent);
+		await grants.attach(CONVERSATION, first, user(), traceparent);
+		expect(auth.traces).toEqual([traceparent, traceparent]);
+	});
+
 	it("opens a root from a user token, then extends it", async () => {
 		const auth = new FakeAuth();
 		const grants = broker(auth);

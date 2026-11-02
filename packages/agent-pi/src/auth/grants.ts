@@ -81,21 +81,26 @@ export class GrantBroker {
 	 * current one. A delegated token opens a child of the caller's grant. With a grant already in hand, an outage does
 	 * not stop the request: the grant lasts hours, and the next request extends it.
 	 */
-	async attach(conversationId: ConversationId, stored: StoredGrant | undefined, principal: Principal): Promise<StoredGrant> {
+	async attach(
+		conversationId: ConversationId,
+		stored: StoredGrant | undefined,
+		principal: Principal,
+		traceparent?: string,
+	): Promise<StoredGrant> {
 		const parent = typeof principal.claims.grant === "string" ? principal.claims.grant : undefined;
 		const current = stored ?? this.#byConversation.get(conversationId);
 		let grant: StoredGrant | undefined;
 		if (current !== undefined && current.parent === parent) {
-			grant = parent === undefined ? await this.#extended(current, principal) : current;
+			grant = parent === undefined ? await this.#extended(current, principal, traceparent) : current;
 		}
-		grant ??= await this.#open(principal, parent);
+		grant ??= await this.#open(principal, parent, traceparent);
 		this.#byConversation.set(conversationId, grant);
 		return grant;
 	}
 
-	async #extended(current: StoredGrant, principal: Principal): Promise<StoredGrant | undefined> {
+	async #extended(current: StoredGrant, principal: Principal, traceparent?: string): Promise<StoredGrant | undefined> {
 		try {
-			await this.#serviceCall(`/v1/grants/${encodeURIComponent(current.grantId)}/extend`, { subject_token: principal.token });
+			await this.#serviceCall(`/v1/grants/${encodeURIComponent(current.grantId)}/extend`, { subject_token: principal.token }, traceparent);
 			return current;
 		} catch (error) {
 			if (error instanceof GrantError && error.reason === "unavailable") return current;
@@ -103,8 +108,8 @@ export class GrantBroker {
 		}
 	}
 
-	async #open(principal: Principal, parent: string | undefined): Promise<StoredGrant> {
-		const created = await this.#create(principal.token, this.#narrowed(principal));
+	async #open(principal: Principal, parent: string | undefined, traceparent?: string): Promise<StoredGrant> {
+		const created = await this.#create(principal.token, this.#narrowed(principal), traceparent);
 		return { grantId: created, ...(parent === undefined ? {} : { parent }) };
 	}
 
@@ -120,8 +125,12 @@ export class GrantBroker {
 		};
 	}
 
-	async #create(subjectToken: string, wanted: { actions: readonly string[]; audiences: readonly string[] }): Promise<string> {
-		const body = await this.#serviceCall("/v1/grants", { subject_token: subjectToken, ...wanted });
+	async #create(
+		subjectToken: string,
+		wanted: { actions: readonly string[]; audiences: readonly string[] },
+		traceparent?: string,
+	): Promise<string> {
+		const body = await this.#serviceCall("/v1/grants", { subject_token: subjectToken, ...wanted }, traceparent);
 		if (typeof body.id !== "string") throw new GrantError("unavailable", "the auth service returned no grant id");
 		return body.id;
 	}
@@ -244,12 +253,12 @@ export class GrantBroker {
 		return this.#service.token;
 	}
 
-	async #serviceCall(path: string, body: unknown): Promise<Record<string, unknown>> {
-		return this.#post(path, await this.#serviceToken(), body);
+	async #serviceCall(path: string, body: unknown, traceparent?: string): Promise<Record<string, unknown>> {
+		return this.#post(path, await this.#serviceToken(), body, traceparent);
 	}
 
 	/** Retries while the auth service is unreachable or failing. A refusal is an answer, so it isn't retried. */
-	async #post(path: string, bearer: string | undefined, body: unknown): Promise<Record<string, unknown>> {
+	async #post(path: string, bearer: string | undefined, body: unknown, traceparent?: string): Promise<Record<string, unknown>> {
 		let lastError = "no attempt";
 		for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
 			if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, this.#retryDelayMs * 2 ** (attempt - 1)));
@@ -260,6 +269,7 @@ export class GrantBroker {
 					headers: {
 						"content-type": "application/json",
 						...(bearer === undefined ? {} : { authorization: `Bearer ${bearer}` }),
+						...(traceparent === undefined ? {} : { traceparent }),
 					},
 					...(body === undefined ? {} : { body: JSON.stringify(body) }),
 					signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
