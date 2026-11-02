@@ -8,6 +8,7 @@ import type { InstructionSection } from "./agent/core-extension.ts";
 import type { ModelConfig } from "./agent/models.ts";
 import { GATEWAY_IDENTITY_HEADERS, type IdentityHeaderNames } from "./identity.ts";
 import type { McpServerConfig } from "./mcp/manager.ts";
+import type { BearerSource } from "./mcp/token.ts";
 
 export type ProfileConfig = {
 	readonly model: string;
@@ -352,7 +353,7 @@ export function loadConfig(path: string): AppConfig {
 	// An empty url turns a server off, so one config file can serve both modes from the environment.
 	const mcpServers = (Array.isArray(raw.mcpServers) ? raw.mcpServers : [])
 		.filter((value) => (value as { url?: unknown } | null)?.url !== "")
-		.map((value, index) => parseMcpServer(r, value, `mcpServers[${index}]`));
+		.map((value, index) => parseMcpServer(r, value, `mcpServers[${index}]`, file));
 
 	const mcpEndpoint = raw.mcpEndpoint === undefined ? undefined : parseMcpEndpoint(r, raw.mcpEndpoint);
 
@@ -490,7 +491,7 @@ function parseMcpEndpoint(r: Reader, value: unknown): McpEndpointConfig {
 	return { path: r.optionalString(endpoint.path, `${at}.path`) ?? "/mcp", tools };
 }
 
-function parseMcpServer(r: Reader, value: unknown, at: string): McpServerConfig {
+function parseMcpServer(r: Reader, value: unknown, at: string, file: (relative: string) => string): McpServerConfig {
 	const s = r.object(value, at);
 	const name = r.string(s.name, `${at}.name`);
 	const prefix = typeof s.prefix === "string" ? s.prefix : undefined;
@@ -525,12 +526,30 @@ function parseMcpServer(r: Reader, value: unknown, at: string): McpServerConfig 
 	}
 	const tokenHeader = r.optionalString(s.tokenHeader, `${at}.tokenHeader`);
 	const agentContext = r.boolean(s.agentContext, `${at}.agentContext`, false);
+	const auth = r.oneOf(s.auth, `${at}.auth`, ["static", "grant", "bearer"] as const, "static");
+	if (auth !== "bearer" && s.tenants !== undefined) r.fail(`${at}.tenants`, 'is only for auth "bearer"');
+	let bearer: BearerSource | undefined;
+	if (auth === "bearer") {
+		if (tokenHeader !== undefined) r.fail(`${at}.tokenHeader`, 'is not used with auth "bearer"; the token is sent as Authorization');
+		if (typeof s.token === "string" && s.token.trim() === "") {
+			r.fail(`${at}.token`, "is empty; set the variable it reads, or set url to empty to turn the server off");
+		}
+		const token = r.optionalString(s.token, `${at}.token`);
+		const tokenFile = r.optionalString(s.tokenFile, `${at}.tokenFile`);
+		if ((token === undefined) === (tokenFile === undefined)) r.fail(at, 'auth "bearer" needs exactly one of token and tokenFile');
+		if (token !== undefined) {
+			bearer = { token: token.trim() };
+		} else {
+			bearer = { tokenFile: file(tokenFile!) };
+		}
+	}
 	return {
 		...common,
 		transport,
 		url: r.string(s.url, `${at}.url`),
 		headers: stringMap(s.headers, `${at}.headers`),
-		auth: r.oneOf(s.auth, `${at}.auth`, ["static", "grant"] as const, "static"),
+		auth,
+		...(bearer === undefined ? {} : { bearer, tenants: r.strings(s.tenants, `${at}.tenants`) }),
 		...(tokenHeader === undefined ? {} : { tokenHeader }),
 		...(agentContext ? { agentContext } : {}),
 	};

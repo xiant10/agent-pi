@@ -61,6 +61,10 @@ function mcpTool(entry: CatalogEntry, manager: McpManager, grants: GrantBroker |
 		replay: "unsafe",
 		execute: async (args, api, context) => {
 			try {
+				const session = await readSession(api, api.conversationId, context);
+				if (!manager.allowsTenant(entry, session?.tenantId)) {
+					return { output: [{ type: "text", text: "This tool isn't available to this tenant." }], isError: true };
+				}
 				const caller = grants === undefined ? undefined : grantCaller(grants, api.conversationId);
 				const result = await manager.callTool(entry, args, caller, context.abortSignal, () => callMeta(api, context));
 				// MCP reports tool failures in the result, not as protocol errors.

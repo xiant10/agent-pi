@@ -270,6 +270,16 @@ When it would exceed `maxActiveTools`, the least recently activated tools are ev
   grant (in `tokenHeader`, default `Authorization`). The user's token never reaches the server. Runs continue while
   the user is offline, and resume after a restart from the grant ID stored on the session. It needs a `grants` section,
   which needs `auth.kind: "jwt"`. A rotated token gets a new connection, and the old one closes once its last call ends.
+- `auth: "bearer"` is for an external service with its own API token. One shared connection sends
+  `Authorization: Bearer <token>`. Give exactly one of `token` (usually `"${EXT_MCP_TOKEN}"`) or `tokenFile` (resolved
+  against the config's directory). A file is re-read every few seconds and after a 401, so a rotated secret needs no
+  restart. An empty token is a config error; to disable the server, set `url` empty instead. It does not combine with
+  `tokenHeader`; for a service that wants another header, use `headers` with `auth: "static"`. The token is one
+  identity on the far side, so everyone it serves shares that identity's data and rights. `tenants` lists the tenants
+  allowed to share it, or `"*"` for all, and a call from any other tenant is refused. None listed means none.
+  ```json
+  { "name": "ext", "transport": "http", "url": "${EXT_MCP_URL:-}", "auth": "bearer", "token": "${EXT_MCP_TOKEN:-}", "tenants": "${EXT_MCP_TENANTS:-}" }
+  ```
 - An empty `url` turns the server off, so one config file can serve deployments with and without it.
 - A server that is down at startup is retried with backoff; its tools join the catalog when it connects, and
   `tools/list_changed` re-lists them. The server never blocks startup or other servers.

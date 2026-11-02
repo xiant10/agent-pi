@@ -78,7 +78,8 @@
 		"audiences": "${GRANT_AUDIENCES:-agent-pi}"
 	},
 	"mcpServers": [
-		{ "name": "collab", "transport": "http", "url": "${COLLAB_MCP_URL:-}", "auth": "grant", "prefix": "", "agentContext": true }
+		{ "name": "collab", "transport": "http", "url": "${COLLAB_MCP_URL:-}", "auth": "grant", "prefix": "", "agentContext": true },
+		{ "name": "data", "transport": "http", "url": "${DATA_MCP_URL:-}", "auth": "bearer", "token": "${DATA_MCP_TOKEN:-}", "tenants": "${DATA_MCP_TENANTS:-}", "agentContext": true }
 	],
 	"limits": {
 		"maxSessionsPerUser": "${MAX_SESSIONS_PER_USER:-200}",

@@ -6,7 +6,7 @@
 # only be added. Scaling down strands the sessions on the removed volume.
 #
 # Each new replica needs an AGENT_URLS entry in ai-gateway-agent and in
-# t10-livekit-agent. The secret holds AUTH_CLIENT_SECRET and LLM_API_KEY.
+# t10-livekit-agent. The secret holds AUTH_CLIENT_SECRET, LLM_API_KEY, and DATA_MCP_TOKEN.
 apiVersion: v1
 kind: Service
 metadata:
@@ -88,6 +88,13 @@ spec:
             # auth-server's clients.yaml has to allow these before this rolls out.
             - name: COLLAB_MCP_URL
               value: http://t10-collab.t10.svc.cluster.local:8082/mcp
+            # An external service with its own bearer token, DATA_MCP_TOKEN in the secret.
+            # That token is one identity there, so every call is refused unless
+            # DATA_MCP_TENANTS names the t10 tenants that may share it.
+            - name: DATA_MCP_URL
+              value: https://data-api.ayzntech.com/mcp/external
+            - name: DATA_MCP_TENANTS
+              value: ""
             - name: GRANT_ACTIONS
               value: agent:use,work:read,work:write
             - name: GRANT_AUDIENCES

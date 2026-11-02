@@ -6,6 +6,7 @@ import {
 	StdioTransport,
 	StreamableHttpTransport,
 } from "@earendil-works/pi-mcp";
+import { bearerProvider, type BearerSource } from "./token.ts";
 import { type CatalogEntry, compilePattern, offeredName, type ToolCatalog } from "../tools/catalog.ts";
 import type { Logger } from "../util/log.ts";
 
@@ -30,9 +31,16 @@ export type McpServerConfig =
 			readonly headers?: Readonly<Record<string, string>>;
 			/**
 			 * `static` (default): one shared connection with `headers`. `grant`: calls go over a per-grant connection that
-			 * carries a token minted from the conversation's grant in `tokenHeader` (default `Authorization`).
+			 * carries a token minted from the conversation's grant in `tokenHeader` (default `Authorization`). `bearer`:
+			 * one shared connection that sends `bearer` as `Authorization: Bearer`, for a service with its own token.
 			 */
-			readonly auth?: "static" | "grant";
+			readonly auth?: "static" | "grant" | "bearer";
+			readonly bearer?: BearerSource;
+			/**
+			 * The tenants a `bearer` server may be used for, or `*` for all. Its one token is one identity on the far side, so
+			 * every tenant it serves shares that identity's data. None listed means none.
+			 */
+			readonly tenants?: readonly string[];
 			readonly tokenHeader?: string;
 			/** The server is another agent: `tools/call` carries the trace, turn, and hop count in `_meta`. */
 			readonly agentContext?: boolean;
@@ -155,6 +163,14 @@ export class McpManager {
 			tools: this.#catalog.entries(server.config.name).length,
 			...(server.lastError === undefined ? {} : { lastError: server.lastError }),
 		}));
+	}
+
+	/** Whether a conversation of this tenant may call `entry`. Only a `bearer` server limits this; the others check each caller. */
+	allowsTenant(entry: CatalogEntry, tenantId: string | undefined): boolean {
+		const config = this.#servers.get(entry.server)?.config;
+		if (config?.transport !== "http" || config.auth !== "bearer") return true;
+		const tenants = config.tenants ?? [];
+		return tenants.includes("*") || (tenantId !== undefined && tenants.includes(tenantId));
 	}
 
 	/** Call `entry` for `caller`. Grant servers use a connection of that grant's own. */
@@ -364,7 +380,11 @@ export function defaultTransport(config: McpServerConfig, headers: Readonly<Reco
 			...(config.cwd === undefined ? {} : { cwd: config.cwd }),
 		});
 	}
-	return new StreamableHttpTransport({ url: config.url, headers: { ...headers } });
+	return new StreamableHttpTransport({
+		url: config.url,
+		headers: { ...headers },
+		...(config.auth === "bearer" && config.bearer !== undefined ? { authProvider: bearerProvider(config.bearer) } : {}),
+	});
 }
 
 function message(error: unknown): string {
