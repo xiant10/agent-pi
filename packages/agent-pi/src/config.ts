@@ -349,9 +349,10 @@ export function loadConfig(path: string): AppConfig {
 		});
 	}
 
-	const mcpServers = (Array.isArray(raw.mcpServers) ? raw.mcpServers : []).map((value, index) =>
-		parseMcpServer(r, value, `mcpServers[${index}]`),
-	);
+	// An empty url turns a server off, so one config file can serve both modes from the environment.
+	const mcpServers = (Array.isArray(raw.mcpServers) ? raw.mcpServers : [])
+		.filter((value) => (value as { url?: unknown } | null)?.url !== "")
+		.map((value, index) => parseMcpServer(r, value, `mcpServers[${index}]`));
 
 	const mcpEndpoint = raw.mcpEndpoint === undefined ? undefined : parseMcpEndpoint(r, raw.mcpEndpoint);
 

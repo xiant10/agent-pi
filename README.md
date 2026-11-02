@@ -234,7 +234,7 @@ Models and profiles can also come from code: bind `Services.models` or `Services
 ]
 ```
 
-Tools are offered as `<prefix><tool>` (default prefix `<name>_`; `"prefix": ""` for bare names). `auth: "grant"` calls the server with a short token minted from the conversation's agent grant, over a connection of that grant's own; `headers` are then used only to list tools, and the config needs a `grants` section. The user's token never reaches the server. `include`/`exclude` filter tools by glob. Servers connect in the background with backoff and re-list on `tools/list_changed`; `/readyz` reports each server's state.
+Tools are offered as `<prefix><tool>` (default prefix `<name>_`; `"prefix": ""` for bare names). `auth: "grant"` calls the server with a short token minted from the conversation's agent grant, over a connection of that grant's own; `headers` are then used only to list tools, and the config needs a `grants` section. The user's token never reaches the server. `include`/`exclude` filter tools by glob. An empty `url` turns a server off. Servers connect in the background with backoff and re-list on `tools/list_changed`; `/readyz` reports each server's state.
 
 ### Skills
 

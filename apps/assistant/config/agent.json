@@ -77,7 +77,9 @@
 		"actions": "${GRANT_ACTIONS:-agent:use}",
 		"audiences": "${GRANT_AUDIENCES:-agent-pi}"
 	},
-	"mcpServers": [],
+	"mcpServers": [
+		{ "name": "collab", "transport": "http", "url": "${COLLAB_MCP_URL:-}", "auth": "grant", "prefix": "", "agentContext": true }
+	],
 	"limits": {
 		"maxSessionsPerUser": "${MAX_SESSIONS_PER_USER:-200}",
 		"maxBodyBytes": "${MAX_BODY_BYTES:-16000000}",

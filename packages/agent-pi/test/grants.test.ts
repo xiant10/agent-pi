@@ -678,7 +678,7 @@ describe("a run under a grant", () => {
 });
 
 describe("the grants config", () => {
-	const write = (grants: object) => {
+	const write = (grants: object, mcpServers: readonly object[] = []) => {
 		const dir = mkdtempSync(join(tmpdir(), "agent-config-"));
 		const path = join(dir, "agent.json");
 		writeFileSync(
@@ -691,6 +691,7 @@ describe("the grants config", () => {
 				defaultProfile: "chat",
 				instructions: [],
 				grants,
+				mcpServers,
 			}),
 		);
 		return path;
@@ -703,6 +704,12 @@ describe("the grants config", () => {
 
 	it("is off when its url is empty", () => {
 		expect(loadConfig(write({ url: "", clientId: "", clientSecret: "", actions: "", audiences: "" })).grants).toBeUndefined();
+	});
+
+	it("leaves out a server whose url is empty", () => {
+		const off = { url: "", clientId: "", clientSecret: "", actions: "", audiences: "" };
+		const servers = [{ name: "crm", transport: "http", url: "", auth: "grant" }, { name: "docs", transport: "http", url: "http://docs" }];
+		expect(loadConfig(write(off, servers)).mcpServers.map((server) => server.name)).toEqual(["docs"]);
 	});
 
 	it("refuses a url with no secret", () => {

@@ -85,6 +85,13 @@ spec:
               value: http://auth-server.t10.svc.cluster.local:8081
             - name: LLM_BASE_URL
               value: http://ai-gateway-llm.t10.svc.cluster.local:7200/v1
+            # auth-server's clients.yaml has to allow these before this rolls out.
+            - name: COLLAB_MCP_URL
+              value: http://t10-collab.t10.svc.cluster.local:8082/mcp
+            - name: GRANT_ACTIONS
+              value: agent:use,work:read,work:write
+            - name: GRANT_AUDIENCES
+              value: agent-pi,t10-collab
           envFrom:
             - secretRef:
                 name: agent-pi

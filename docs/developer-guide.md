@@ -270,6 +270,7 @@ When it would exceed `maxActiveTools`, the least recently activated tools are ev
   grant (in `tokenHeader`, default `Authorization`). The user's token never reaches the server. Runs continue while
   the user is offline, and resume after a restart from the grant ID stored on the session. It needs a `grants` section,
   which needs `auth.kind: "jwt"`. A rotated token gets a new connection, and the old one closes once its last call ends.
+- An empty `url` turns the server off, so one config file can serve deployments with and without it.
 - A server that is down at startup is retried with backoff; its tools join the catalog when it connects, and
   `tools/list_changed` re-lists them. The server never blocks startup or other servers.
 
