@@ -39,6 +39,7 @@ import { resolveInstance, SessionStore } from "./sessions.ts";
 import { discoverSkills, type Skill } from "./skills/skills.ts";
 import { type CatalogEntry, ToolCatalog } from "./tools/catalog.ts";
 import { mcpExtension, mcpExtensionName } from "./tools/mcp-extension.ts";
+import { capabilitiesOf, runtimeManifest } from "./runtime.ts";
 import { createHttpServer } from "./transport/http.ts";
 import { McpEndpoint } from "./transport/mcp.ts";
 import { CORE_METHODS } from "./transport/streamable-http.ts";
@@ -206,7 +207,8 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 		throw error;
 	});
 	const { instanceId } = instance;
-	const store = new SessionStore(harness, instance, config.limits.maxSessionsPerUser);
+	const capabilities = capabilitiesOf(config.storage.kind, plugins.rpcMethods);
+	const store = new SessionStore(harness, instance, config.limits.maxSessionsPerUser, capabilities);
 	const hubs = new HubRegistry(harness, {}, log);
 	plugins.attach({ harness, credentials, profile: profileOf, publicId: (id) => store.publicId(id), log });
 	grants?.attachStore(async (id) => {
@@ -257,6 +259,13 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 						endpoint: new McpEndpoint({ agent: config.agent, tools: mcpEndpoint.tools, service, log, keepAliveMs: config.http.keepAliveMs, maxBodyBytes: config.limits.maxBodyBytes }),
 					},
 				}),
+		runtime: runtimeManifest({
+			agent: config.agent,
+			bundle: config.bundle,
+			profiles: Object.keys(config.profiles),
+			capabilities,
+			methods: plugins.rpcMethods,
+		}),
 		readiness: () => ({ ready: !closing && !failed, detail: { agent: config.agent, instanceId, tools: catalog.size, mcp: mcp.status() } }),
 	});
 	// Tokens of sessions nobody has called for a while leave memory; a working session keeps its caller's token.

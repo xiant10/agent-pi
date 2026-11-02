@@ -29,7 +29,7 @@
 			"api": "${LLM_API:-chat-completions}",
 			"contextWindow": "${FAST_MODEL_CONTEXT:-128000}",
 			"maxOutputTokens": 1024,
-			"identityHeaders": "gateway"
+			"identityHeaders": "${LLM_IDENTITY_HEADERS:-gateway}"
 		},
 		"smart": {
 			"provider": "openai-compatible",
@@ -41,7 +41,7 @@
 			"reasoning": "${SMART_MODEL_REASONING:-false}",
 			"contextWindow": "${SMART_MODEL_CONTEXT:-128000}",
 			"maxOutputTokens": 8192,
-			"identityHeaders": "gateway"
+			"identityHeaders": "${LLM_IDENTITY_HEADERS:-gateway}"
 		}
 	},
 	"defaultProfile": "chat",

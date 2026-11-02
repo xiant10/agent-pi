@@ -19,6 +19,8 @@ export type SessionInfo = {
 	readonly lastActiveAt: number;
 	readonly archived?: true;
 	readonly metadata?: JsonObject;
+	/** What this session supports, so a client can hide what it doesn't. */
+	readonly capabilities: readonly string[];
 };
 
 export type ResolvedInstance = {
@@ -61,12 +63,14 @@ export class SessionStore {
 	readonly instanceId: string;
 	readonly #legacyId: string | undefined;
 	readonly #maxPerUser: number;
+	readonly #capabilities: readonly string[];
 
-	constructor(harness: Harness, instance: ResolvedInstance, maxPerUser: number) {
+	constructor(harness: Harness, instance: ResolvedInstance, maxPerUser: number, capabilities: readonly string[]) {
 		this.#harness = harness;
 		this.instanceId = instance.instanceId;
 		this.#legacyId = instance.legacyId;
 		this.#maxPerUser = maxPerUser;
+		this.#capabilities = capabilities;
 	}
 
 	publicId(conversationId: ConversationId): string {
@@ -261,6 +265,7 @@ export class SessionStore {
 			lastActiveAt: session.lastActiveAt ?? session.createdAt,
 			...(session.archived === true ? { archived: true as const } : {}),
 			...(session.metadata === undefined ? {} : { metadata: session.metadata }),
+			capabilities: this.#capabilities,
 		};
 	}
 }

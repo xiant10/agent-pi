@@ -73,6 +73,8 @@ export type PluginRef = { readonly use: string; readonly options: JsonObject };
 export type AppConfig = {
 	/** Which agent this is: the first part of session ids, and its name in logs, traces, and gateway headers. */
 	readonly agent: string;
+	/** The version of this agent's content, shown in `/v1/runtime`. */
+	readonly bundle?: string;
 	/** Where relative paths in plugin options start: the config file's directory. */
 	readonly baseDir: string;
 	readonly port: number;
@@ -383,8 +385,10 @@ export function loadConfig(path: string): AppConfig {
 	const maxRetries = r.optionalNumber(retry.maxRetries, "durable.retry.maxRetries");
 	const baseDelayMs = r.optionalNumber(retry.baseDelayMs, "durable.retry.baseDelayMs");
 
+	const bundle = r.optionalString(raw.bundle, "bundle");
 	return {
 		agent,
+		...(bundle === undefined || bundle === "" ? {} : { bundle }),
 		baseDir: dir,
 		port: r.number(raw.port, "port", 9800),
 		host: r.optionalString(raw.host, "host") ?? "0.0.0.0",
@@ -462,9 +466,12 @@ function parseModel(r: Reader, value: unknown, at: string): ModelConfig {
 	};
 }
 
-/** `"gateway"` for the agent gateway's audit headers, or an object naming the header of each identity field. */
+/**
+ * `"gateway"` for the agent gateway's audit headers, `"none"` to send none, as to a provider called directly, or an
+ * object naming the header of each identity field.
+ */
 function parseIdentityHeaders(r: Reader, value: unknown, at: string): IdentityHeaderNames | undefined {
-	if (value === undefined) return undefined;
+	if (value === undefined || value === "none") return undefined;
 	if (value === "gateway") return GATEWAY_IDENTITY_HEADERS;
 	const fields = r.object(value, at);
 	const names: Record<string, string> = {};

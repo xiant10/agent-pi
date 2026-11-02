@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { type Authenticator, AuthError, type Principal } from "../auth/authenticator.ts";
+import type { RuntimeManifest } from "../runtime.ts";
 import type { AgentService } from "../service.ts";
 import type { Logger } from "../util/log.ts";
 import { traceIdOf } from "../util/tracing.ts";
 import type { McpEndpoint } from "./mcp.ts";
-import { handleStreamable, SESSION_HEADER, SUBMISSION_HEADER, toAppError, TRACE_HEADER, TURN_HEADER, writeJson } from "./streamable-http.ts";
+import { AGENT_HEADER, handleStreamable, METHOD_HEADER, SESSION_HEADER, SUBMISSION_HEADER, toAppError, TRACE_HEADER, TURN_HEADER, writeJson } from "./streamable-http.ts";
 
 export type HttpOptions = {
 	readonly authenticator: Authenticator;
@@ -21,10 +22,12 @@ export type HttpOptions = {
 	readonly mcp?: { readonly path: string; readonly endpoint: McpEndpoint };
 	/** For `/readyz`. */
 	readonly readiness: () => { readonly ready: boolean; readonly detail: unknown };
+	/** For `/v1/runtime`. */
+	readonly runtime: RuntimeManifest;
 };
 
 /**
- * Routes: `/healthz` and `/readyz` without auth (container probes), the agent endpoint behind the authenticator, 404
+ * Routes: `/healthz`, `/readyz` and `/v1/runtime` without auth, the agent endpoint behind the authenticator, 404
  * otherwise. Authentication runs before any body is read or any session is touched.
  */
 export function createHttpServer(options: HttpOptions): Server {
@@ -85,13 +88,14 @@ async function route(
 		}
 		return writeJson(res, status, { ready, detail });
 	}
+	if (req.method === "GET" && path === "/v1/runtime") return writeJson(res, 200, options.runtime);
 	if (path !== options.path && path !== options.mcp?.path) return writeJson(res, 404, { error: "not_found" });
 
 	if (!applyCors(req, res, options.allowedOrigins)) return writeJson(res, 403, { error: "origin_not_allowed" });
 	if (req.method === "OPTIONS") {
 		res.writeHead(204, {
 			"access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
-			"access-control-allow-headers": `authorization, content-type, accept, last-event-id, mcp-session-id, mcp-protocol-version, ${SESSION_HEADER}, ${TURN_HEADER}, ${TRACE_HEADER}`,
+			"access-control-allow-headers": `authorization, content-type, accept, last-event-id, mcp-session-id, mcp-protocol-version, ${SESSION_HEADER}, ${AGENT_HEADER}, ${METHOD_HEADER}, ${TURN_HEADER}, ${TRACE_HEADER}`,
 			"access-control-max-age": "600",
 		});
 		res.end();
@@ -109,7 +113,12 @@ async function route(
 	}
 	onPrincipal(principal);
 	if (path === options.mcp?.path) return options.mcp.endpoint.handle(req, res, principal);
+	const named = req.headers[AGENT_HEADER];
+	if (typeof named === "string" && named !== "" && named !== options.runtime.agent) {
+		return writeJson(res, 400, { error: "unknown_agent", message: `this harness serves ${options.runtime.agent}, not ${named}` });
+	}
 	await handleStreamable(req, res, principal, {
+		agent: options.runtime.agent,
 		service: options.service,
 		log: options.log,
 		keepAliveMs: options.keepAliveMs,

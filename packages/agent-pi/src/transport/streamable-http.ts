@@ -13,6 +13,10 @@ import { validTraceparent } from "../util/tracing.ts";
 import { SseStream } from "./sse.ts";
 
 export const SESSION_HEADER = "agent-session-id";
+/** Names the agent a call is for. A router uses it, and a harness refuses a name it doesn't serve. */
+export const AGENT_HEADER = "agent-name";
+/** A router needs it. A harness reads the method from the body. */
+export const METHOD_HEADER = "agent-method";
 /** Names the turn a prompt starts; the `turnId` param wins. */
 export const TURN_HEADER = "x-turn-id";
 /** The W3C trace context of the client's turn. */
@@ -22,6 +26,7 @@ export const SUBMISSION_HEADER = "agent-submission-id";
 
 /** Methods the transport defines; plugins add others. */
 export const CORE_METHODS = [
+	"agents.list",
 	"session.create",
 	"session.list",
 	"session.get",
@@ -40,6 +45,8 @@ export type RpcId = string | number | null;
 export type RpcRequest = { readonly id?: RpcId; readonly method: string; readonly params: Record<string, unknown> };
 
 export type StreamableOptions = {
+	/** The agent this harness serves. */
+	readonly agent: string;
 	readonly service: AgentService;
 	readonly log: Logger;
 	readonly keepAliveMs: number;
@@ -129,6 +136,9 @@ async function dispatch(
 	const context = BACKGROUND_CONTEXT;
 	const session = () => sessionOf(req, params);
 	switch (request.method) {
+		// A router with several agents answers this itself. Here it's the one agent this harness serves.
+		case "agents.list":
+			return { result: { agents: [{ name: options.agent }] } };
 		case "session.create": {
 			const metadata = params.metadata === undefined ? undefined : objectParam(params.metadata, "metadata");
 			const info = await service.createSession(

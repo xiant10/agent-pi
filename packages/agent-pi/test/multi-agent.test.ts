@@ -33,6 +33,49 @@ function sqlite(): Pick<AppConfig, "storage"> {
 	return { storage: { kind: "sqlite", path: join(mkdtempSync(join(tmpdir(), "agent-multi-")), "agent.sqlite") } };
 }
 
+describe("harness contract", () => {
+	it("describes itself at /v1/runtime without a token", async () => {
+		const agent = await start({ config: { agent: "sales", bundle: "sales@1" } });
+		const manifest = (await (await fetch(`${agent.url.replace(/\/agent$/, "")}/v1/runtime`)).json()) as Record<string, unknown>;
+		expect(manifest).toMatchObject({ contract: 0, harness: "pi", pool: "sales", agent: "sales", bundle: "sales@1", builtin_tools: [] });
+		expect(manifest.capabilities).toEqual(expect.arrayContaining(["steer", "interrupt", "voice", "retry"]));
+	});
+
+	it("answers agents.list with its own agent, and reports capabilities on a session", async () => {
+		const agent = await start({ config: { agent: "sales" } });
+		expect((await rpc(agent.url, TOKENS.alice, "agents.list")).body.result).toEqual({ agents: [{ name: "sales" }] });
+		const created = (await rpc(agent.url, TOKENS.alice, "session.create")).body.result!;
+		expect(created.capabilities).toEqual(expect.arrayContaining(["steer", "voice"]));
+	});
+
+	it("refuses a call for an agent it doesn't serve, and ignores a router's method header", async () => {
+		const agent = await start({ config: { agent: "sales" } });
+		const call = (headers: Record<string, string>) =>
+			fetch(agent.url, {
+				method: "POST",
+				headers: { authorization: `Bearer ${TOKENS.alice}`, "content-type": "application/json", ...headers },
+				body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "agents.list" }),
+			});
+		expect((await call({ "agent-name": "assistant" })).status).toBe(400);
+		expect((await call({ "agent-name": "sales", "agent-method": "agents.list" })).status).toBe(200);
+	});
+
+	it('sends no identity headers when set to "none"', () => {
+		const dir = mkdtempSync(join(tmpdir(), "agent-config-"));
+		const path = join(dir, "agent.json");
+		writeFileSync(
+			path,
+			JSON.stringify({
+				agent: "a",
+				auth: { kind: "static", tokens: "{}" },
+				models: { main: { provider: "openai-compatible", providerId: "direct", modelId: "m", baseUrl: "http://model/v1", identityHeaders: "none" } },
+				profiles: { chat: { model: "main" } },
+			}),
+		);
+		expect(loadConfig(path).models.main).not.toHaveProperty("identityHeaders");
+	});
+});
+
 describe("agent identity", () => {
 	it("keeps agents with one replica id apart: 421, never the other agent's conversation", async () => {
 		const support = await start({ config: { agent: "support", instanceId: "agent-1" } });

@@ -110,6 +110,11 @@ export class PluginRunner {
 		return byPlugin;
 	}
 
+	/** Every plugin JSON-RPC method. */
+	get rpcMethods(): readonly string[] {
+		return [...this.#rpc.keys()];
+	}
+
 	rpc(method: string): { readonly plugin: AgentPlugin; readonly handler: RpcHandler } | undefined {
 		return this.#rpc.get(method);
 	}
