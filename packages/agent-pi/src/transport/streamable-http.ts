@@ -31,6 +31,7 @@ export const CORE_METHODS = [
 	"session.list",
 	"session.get",
 	"session.messages",
+	"session.tool",
 	"session.update",
 	"session.prompt",
 	"session.steer",
@@ -165,6 +166,8 @@ async function dispatch(
 			};
 		case "session.get":
 			return { result: await service.getSession(principal, session(), context) };
+		case "session.tool":
+			return { result: await service.toolPayload(principal, session(), params.callId, context) };
 		case "session.messages":
 			return {
 				result: await service.messages(

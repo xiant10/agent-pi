@@ -90,6 +90,20 @@ describe("session.messages", () => {
 		expect(nextCursor).toBeUndefined();
 		expect(messages[0]).toMatchObject({ role: "user", text: "Find it", turnId: "t1", requestId: "r1" });
 		expect(messages.at(-1)).toMatchObject({ role: "assistant", text: "Found it." });
+		const tool = messages.find((line) => line.role === "tool") as Line & { callId: string };
+		expect(tool).toBeDefined();
+		expect(tool).not.toHaveProperty("response");
+		const payload = await rpc(running.url, TOKENS.alice, "session.tool", { sessionId, callId: tool.callId });
+		expect(payload.body.result).toMatchObject({
+			request: { type: "toolCall", id: tool.callId, name: "crm_lookup", arguments: {} },
+			response: { role: "toolResult", toolCallId: tool.callId, content: [{ type: "text", text: "ok lookup" }] },
+		});
+		expect((await rpc(running.url, TOKENS.bob, "session.tool", { sessionId, callId: tool.callId })).status).toBe(404);
+		expect((await rpc(running.url, TOKENS.alice, "session.tool", { sessionId, callId: "missing" })).status).toBe(404);
+		expect((await rpc(running.url, TOKENS.alice, "session.tool", { sessionId, callId: "" })).status).toBe(400);
+		await rpc(running.url, TOKENS.alice, "session.update", { sessionId, archived: true });
+		expect((await rpc(running.url, TOKENS.alice, "session.tool", { sessionId, callId: tool.callId })).body.result).toEqual(payload.body.result);
+
 	});
 
 	it("pages from the newest, and each page runs oldest first", async () => {

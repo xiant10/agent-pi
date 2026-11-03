@@ -231,6 +231,31 @@ export class AgentService {
 		return { messages, ...(cursor === undefined ? {} : { nextCursor: String(oldest) }) };
 	}
 
+	/** Tool payloads are fetched explicitly, only by the session owner, never included in the ordinary transcript. */
+	async toolPayload(principal: Principal, sessionId: string, callId: unknown, context: Context): Promise<{ request?: unknown; response?: unknown }> {
+		if (typeof callId !== "string" || callId.length === 0 || callId.length > 1000) throw invalidParams("callId must be a non-empty string");
+		const { conversation } = await this.#deps.store.readable(principal, sessionId, context);
+		let request: unknown;
+		let response: unknown;
+		let cursor: Awaited<ReturnType<Conversation["entries"]>>["next"];
+		do {
+			const page = await conversation.entries({ order: "descending" }, 100, cursor, context);
+			for (const entry of page.items) {
+				for (const message of entry.model ?? []) {
+					if (message.role === "assistant" && Array.isArray(message.content)) {
+						for (const block of message.content) {
+							if (block.type === "toolCall" && block.id === callId && request === undefined) request = block;
+						}
+					}
+					if (message.role === "toolResult" && message.toolCallId === callId && response === undefined) response = message;
+				}
+			}
+			cursor = page.next;
+		} while (cursor !== undefined && (request === undefined || response === undefined));
+		if (request === undefined && response === undefined) throw new AppError("tool_not_found", 404, RPC.notFound, "tool payload not found");
+		return { ...(request === undefined ? {} : { request }), ...(response === undefined ? {} : { response }) };
+	}
+
 	/** Which turn and request wrote each user entry. Turns are kept for the newest inputs only. */
 	async #inputs(conversationId: ConversationId, context: Context): Promise<Map<number, { turnId: string; requestId?: string }>> {
 		const inputs = new Map<number, { turnId: string; requestId?: string }>();
