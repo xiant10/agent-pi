@@ -2,6 +2,7 @@
 	"name": "agent-pi",
 	"version": "0.2.0",
 	"description": "Reusable multi-user agent harness on pi-durable: Streamable HTTP, JWT auth, steering, skills with dynamic MCP tool loading, voice output, and a plugin system for business logic",
+	"license": "Apache-2.0",
 	"type": "module",
 	"engines": {
 		"node": ">=24.21.0"

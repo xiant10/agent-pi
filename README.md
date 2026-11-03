@@ -305,3 +305,7 @@ and visible. It reports first readable feedback, first answer text, and model-st
 transport behavior; it is not a production model benchmark. The generic-mode benchmark adds no model request. LLM-generated acknowledgements add one separate inference request and do not make the main model generate its first answer token sooner.
 
 Progress architecture, lifecycle, client integration, and measurement limits: [docs/progress.md](docs/progress.md).
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE).
