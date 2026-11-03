@@ -1,10 +1,10 @@
 # Replicas
 
-How `agent-pi` replicas own sessions, how callers find them, and what that means for scaling. [`design.md`](design.md), "R5", is how a replica guards its storage, and the workspace's [`ARCHITECTURE.md`](../../ARCHITECTURE.md), "Scaling", places it among the other components.
+How `agent-pi` replicas own sessions, how callers find them, and what that means for scaling. [`design.md`](design.md), requirement "R5: multi-user and scaling", is how a replica guards its storage, and the workspace's [`ARCHITECTURE.md`](../../ARCHITECTURE.md), "Communication and scaling", places it among the other components.
 
 Status: routing, placement and merged listing are built. The local cluster runs one replica of each agent.
 
-`agent-pi` scales by owning less, not by sharing storage. Each replica holds its sessions in its own SQLite volume, and a session stays on its replica for life. The session ID `<agent>.<replica>.<n>` names that replica, and a wrong replica answers `421`. Its configuration offers only `memory` and `sqlite` storage.
+`agent-pi` scales by owning less, not by sharing storage. Each replica holds its sessions in its own SQLite volume, and a session stays on its replica for life. The session ID `<pool>.<replica>.<n>` names that replica, where the pool is the configured `agent`, and a wrong replica answers `421`. Its configuration offers only `memory` and `sqlite` storage.
 
 Routing, placement and merged listing are implemented. The local cluster runs one replica each of `assistant` and `sales`; routing within each agent can use more replicas once configured and validated:
 
