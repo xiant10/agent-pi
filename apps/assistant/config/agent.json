@@ -44,6 +44,7 @@
 			"identityHeaders": "${LLM_IDENTITY_HEADERS:-gateway}"
 		}
 	},
+	"progressModel": "fast",
 	"defaultProfile": "chat",
 	"profiles": {
 		"chat": {

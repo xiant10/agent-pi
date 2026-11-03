@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { type AgentEvent, type AgentEventStream, type ConversationId, type Harness, watchEvents } from "@earendil-works/pi-durable";
+import { ProgressController, type ProgressEvent } from "./progress.ts";
 import { TasksDoc } from "../agent/tasks.ts";
 import type { Logger } from "../util/log.ts";
 import { type ClientEventBody, EventMapper, type MapperOptions, type TaskStatus } from "./mapper.ts";
@@ -22,6 +23,7 @@ export type Subscription = {
 
 /** How a hub's mapper is configured, plus an optional transform of every client event (plugins' `mapEvent`). */
 export type HubMapping = MapperOptions & {
+	readonly generatedProgress?: boolean;
 	readonly transform?: (event: ClientEventBody) => ClientEventBody[];
 	/** Sees every event as it happened, whatever `transform` makes of it. */
 	readonly observe?: (event: ClientEventBody) => void;
@@ -54,6 +56,10 @@ export class SessionHub {
 	readonly #detachedMs: number;
 	readonly #epoch = randomBytes(4).toString("hex");
 	readonly #onStop: () => void;
+	#progress: ProgressController | undefined;
+	#latestProgress: ProgressEvent | undefined;
+	#emitProgress: ((event: ProgressEvent) => void) | undefined;
+	#answerStarted = false;
 	#seq = 0;
 	#busy: boolean;
 	#activeTools: string[];
@@ -104,15 +110,27 @@ export class SessionHub {
 		const emit = (body: ClientEventBody) => {
 			observe?.(body);
 			// Snapshots carry the hub's own state; they are not for plugins to change.
-			if (body.type === "snapshot") hub.#publish({ ...body, tasks: [...hub.#tasks.values()] });
+			if (body.type === "snapshot") hub.#publish({ ...body, tasks: [...hub.#tasks.values()], ...(hub.#latestProgress === undefined ? {} : { progress: hub.#latestProgress }) });
 			else if (transform === undefined) hub.#publish(body);
 			else for (const mapped of transform(body)) hub.#publish(mapped);
 		};
+		hub.#emitProgress = emit;
+		hub.#progress = new ProgressController(body => {
+			if (!mapping.generatedProgress || body.phase === "finished") emit(body);
+		});
+		hub.#progress.resume(stream.snapshot.run?.inputs ?? []);
 		stream.start(async (events) => {
 			for (const event of events) {
 				input = latestInput(event) ?? input;
+				if (event.type === "snapshot") {
+					hub.#latestProgress = undefined;
+					hub.#progress?.resume(event.run?.inputs ?? []);
+				}
 				if (startsMessage(event)) await resolveTurn();
-				for (const body of hub.#mapper.map(event)) emit(body);
+				for (const body of hub.#mapper.map(event)) {
+					emit(body);
+					hub.#progress?.observe(body);
+				}
 			}
 		});
 		// Absent for a session without the document, such as a child: it has no tasks to report.
@@ -134,6 +152,11 @@ export class SessionHub {
 		});
 		hub.#scheduleIdle();
 		return hub;
+	}
+
+	/** Publish only while this submission is active; never resurrect completed work. */
+	acknowledge(submissionId: number, text: string): void {
+		if (!this.#stopped && this.#busy && !this.#answerStarted && text.trim()) this.#emitProgress?.({ type: "progress", submissionIds: [submissionId], phase: "working", text });
 	}
 
 	get busy(): boolean {
@@ -164,6 +187,7 @@ export class SessionHub {
 	async stop(): Promise<void> {
 		if (this.#stopped) return;
 		this.#stopped = true;
+		this.#progress?.stop();
 		clearTimeout(this.#idleTimer);
 		this.#onStop();
 		for (const subscriber of [...this.#subscribers]) subscriber.end();
@@ -173,7 +197,15 @@ export class SessionHub {
 	}
 
 	#publish(body: ClientEventBody): void {
-		if (body.type === "run.started") this.#busy = true;
+		if (body.type === "progress") {
+			if (body.phase !== "finished") this.#latestProgress = body;
+			else if (this.#latestProgress !== undefined) {
+				const remaining = this.#latestProgress.submissionIds.filter(id => !body.submissionIds.includes(id));
+				this.#latestProgress = remaining.length ? { ...this.#latestProgress, submissionIds: remaining } : undefined;
+			}
+		}
+		if (body.type === "run.started") { this.#busy = true; this.#answerStarted = false; }
+		if (body.type === "text.delta" && body.text) this.#answerStarted = true;
 		if (body.type === "run.finished") this.#busy = false;
 		if (body.type === "tools.active") this.#activeTools = body.names;
 		if (body.type === "inbox") this.#inbox = body.items;
@@ -211,6 +243,7 @@ export class SessionHub {
 				activeTools: [...this.#activeTools],
 				inbox: [...this.#inbox],
 				tasks: [...this.#tasks.values()],
+				...(this.#latestProgress === undefined ? {} : { progress: this.#latestProgress }),
 				...(partial === undefined ? {} : { partial }),
 			},
 		};

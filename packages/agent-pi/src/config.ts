@@ -87,6 +87,7 @@ export type AppConfig = {
 	readonly grants?: GrantsConfig;
 	readonly models: Readonly<Record<string, ModelConfig>>;
 	readonly profiles: Readonly<Record<string, ProfileConfig>>;
+	readonly progressModel?: string;
 	readonly defaultProfile: string;
 	readonly subagents: Readonly<Record<string, SubagentConfig>>;
 	readonly instructions: readonly InstructionSection[];
@@ -311,6 +312,8 @@ export function loadConfig(path: string): AppConfig {
 					}),
 		};
 	}
+	const progressModel = r.optionalString(raw.progressModel, "progressModel");
+	if (progressModel !== undefined && models[progressModel] === undefined) r.fail("progressModel", "must name a configured model");
 	const defaultProfile = r.optionalString(raw.defaultProfile, "defaultProfile") ?? Object.keys(profiles)[0] ?? "";
 	if (profiles[defaultProfile] === undefined) r.fail("defaultProfile", "must name a configured profile");
 
@@ -398,6 +401,7 @@ export function loadConfig(path: string): AppConfig {
 		auth,
 		models,
 		profiles,
+		...(progressModel === undefined ? {} : { progressModel }),
 		defaultProfile,
 		subagents,
 		instructions,

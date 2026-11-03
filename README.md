@@ -276,3 +276,31 @@ One process runs one agent and holds one SQLite storage: a second process on the
 npm run check   # tsc
 npm test        # vitest over packages/* and apps/*: faux model, in-memory MCP, no network
 ```
+
+### Progress feedback
+
+Streaming clients receive a `progress` event when execution starts, without waiting for a model response.
+It carries `submissionIds`, `phase` (`working`, `waiting`, `retrying`, or `finished`), and `text`.
+Render it in a replaceable status area, separate from answer text. A quiet run gets a waiting notice after
+12 seconds without text or tool activity; identical notices are suppressed. Retry events update the status.
+Clear the status on `finished` or a terminal submission event. Reconnecting clients get the latest status in
+`snapshot.progress`; existing event IDs also support replay. Progress does not enter model history or TTS.
+A queued request is not described as working until execution starts. Clients can show an immediate local
+pending indicator while admission is in progress.
+
+Set `progressModel` to a configured model name for concurrent LLM-generated acknowledgements (the assistant uses `fast`). Generated acknowledgements have a five-second timeout, never enter history, and are discarded if answer text has begun. Generated mode suppresses canned status sentences; without this option, feedback uses generic execution events. Plugins can
+customize or suppress `progress` using `mapEvent`. Clients must opt into rendering the new event; no frontend
+is bundled here. JSON-only callers continue to receive their normal result, or can use `wait: false` with the
+GET event stream.
+
+To measure feedback latency independently of model time to first token:
+
+```bash
+npx vitest run packages/agent-pi/test/progress.test.ts --silent=false
+```
+
+The test streams real HTTP responses against a scripted model with a 600 ms delay, comparing progress hidden
+and visible. It reports first readable feedback, first answer text, and model-start time. This measures local
+transport behavior; it is not a production model benchmark. The generic-mode benchmark adds no model request. LLM-generated acknowledgements add one separate inference request and do not make the main model generate its first answer token sooner.
+
+Progress architecture, lifecycle, client integration, and measurement limits: [docs/progress.md](docs/progress.md).

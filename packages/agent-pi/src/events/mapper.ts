@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import type { AgentEvent, MessageChange, SnapshotEvent } from "@earendil-works/pi-durable";
+import type { ProgressEvent } from "./progress.ts";
 import { SpeechSegmenter } from "./speech.ts";
 
 /** Kind of the entries plugins write without the model (`plugins/history.ts`). */
@@ -15,7 +16,8 @@ export type PartialMessage = MessageRef & { text: string };
 
 /** What a client receives in each `session/event` notification. */
 export type ClientEventBody =
-	| { type: "snapshot"; busy: boolean; activeTools: string[]; inbox: { id: number; mode: string }[]; tasks: TaskStatus[]; partial?: PartialMessage }
+	| ProgressEvent
+	| { type: "snapshot"; busy: boolean; activeTools: string[]; inbox: { id: number; mode: string }[]; tasks: TaskStatus[]; progress?: ProgressEvent; partial?: PartialMessage }
 	| { type: "run.started"; submissionIds: number[] }
 	| { type: "run.finished"; submissionIds: number[] }
 	/** `offset`: where `text` starts in the message's text, to spot a gap or a duplicate. */

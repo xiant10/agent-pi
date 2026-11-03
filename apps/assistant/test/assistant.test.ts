@@ -10,9 +10,9 @@ afterEach(async () => {
 	running = undefined;
 });
 
-/** The assistant as it ships: its real config and the runtime's catalog, with a scripted model. */
+/** App behavior with scripted main-model responses; concurrent acknowledgements have separate transport tests. */
 function startAssistant(): Promise<TestAgent> {
-	const config = loadConfig(fileURLToPath(new URL("../config/agent.json", import.meta.url)));
+	const { progressModel: _progressModel, ...config } = loadConfig(fileURLToPath(new URL("../config/agent.json", import.meta.url)));
 	return startTestAgent({ pluginCatalog: builtinPlugins, config: { ...config, port: 0, host: "127.0.0.1" } });
 }
 

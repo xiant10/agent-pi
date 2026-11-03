@@ -45,6 +45,7 @@ import type { Logger } from "./util/log.ts";
 import { startSpan, traceIdOf, type TraceSpan } from "./util/tracing.ts";
 
 export type ServiceDeps = {
+	readonly acknowledgement?: (input: string, sessionId: string, turnId: string, principal: Principal, signal: AbortSignal) => Promise<string>;
 	readonly harness: Harness;
 	readonly store: SessionStore;
 	readonly catalog: ToolCatalog;
@@ -473,6 +474,17 @@ export class AgentService {
 			if (earlier === undefined) this.#afterRun(conversation.id, session, submission, turn);
 			const record = await submission.status(context);
 			const placement = record.status === "queued" ? "queued" : "placed";
+			if (earlier === undefined && placement === "placed" && this.#deps.acknowledgement !== undefined) {
+				const abort = new AbortController();
+				const timeout = setTimeout(() => abort.abort(), 5000);
+				timeout.unref();
+				void submission.wait(BACKGROUND_CONTEXT).then(() => abort.abort(), () => abort.abort());
+				void this.#deps.acknowledgement(textOf(submitted), sessionId, turn, principal, abort.signal).then(async text => {
+					if (abort.signal.aborted) return;
+					const hub = await this.hub(principal, sessionId, BACKGROUND_CONTEXT);
+					if (!abort.signal.aborted) hub.acknowledge(submission.id, text);
+				}).catch(() => undefined).finally(() => clearTimeout(timeout));
+			}
 			this.#deps.log.info("prompt.admitted", {
 				sessionId,
 				turnId: turn,
@@ -599,6 +611,7 @@ export class AgentService {
 			return workTurn(this.#deps.harness, conversation.id, current, BACKGROUND_CONTEXT);
 		};
 		return this.#deps.hubs.get(conversation.id, {
+			generatedProgress: this.#deps.acknowledgement !== undefined,
 			speech: profile.speech && !child,
 			thinking: profile.thinkingEvents,
 			...(transform === undefined ? {} : { transform }),
