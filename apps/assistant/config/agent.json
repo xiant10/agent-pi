@@ -50,6 +50,7 @@
 			"model": "smart",
 			"thinkingLevel": "${CHAT_THINKING:-off}",
 			"maxActiveTools": 40,
+			"alwaysOnTools": ["collab:work_list"],
 			"preload": { "maxTools": 4, "minScore": 4 }
 		},
 		"voice": {
