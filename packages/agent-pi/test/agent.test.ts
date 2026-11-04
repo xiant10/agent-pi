@@ -408,3 +408,49 @@ describe("expert, credentials, restart", () => {
 		expect(answer.body.result).toMatchObject({ status: "done", text: "second" });
 	});
 });
+
+describe("runs nobody typed", () => {
+	it("answers a repeated create with Agent-Request-Id with the session it made", async () => {
+		running = await startTestAgent();
+		const key = { "agent-request-id": "au_brief:2026-11-04T07:00Z" };
+		const first = await rpc(running.url, TOKENS.alice, "session.create", {}, key);
+		const again = await rpc(running.url, TOKENS.alice, "session.create", {}, key);
+		expect(again.status).toBe(200);
+		expect(again.body.result!.sessionId).toBe(first.body.result!.sessionId);
+		const [racedA, racedB] = await Promise.all([
+			rpc(running.url, TOKENS.alice, "session.create", {}, { "agent-request-id": "raced" }),
+			rpc(running.url, TOKENS.alice, "session.create", {}, { "agent-request-id": "raced" }),
+		]);
+		expect(racedA.body.result!.sessionId).toBe(racedB.body.result!.sessionId);
+		const list = await rpc(running.url, TOKENS.alice, "session.list");
+		expect(list.body.result!.sessions).toHaveLength(2);
+		// The key belongs to its owner, and a create without one is never deduplicated.
+		const bob = await rpc(running.url, TOKENS.bob, "session.create", {}, key);
+		expect(bob.body.result!.sessionId).not.toBe(first.body.result!.sessionId);
+		expect((await rpc(running.url, TOKENS.alice, "session.create")).body.result!.sessionId).not.toBe(first.body.result!.sessionId);
+		expect((await rpc(running.url, TOKENS.alice, "session.create", {}, { "agent-request-id": "has space" })).status).toBe(400);
+	});
+
+	it("records an unattended run's trigger as the session's origin", async () => {
+		const principal = (userId: string, agent?: { trigger: string; automation: string }) => ({
+			userId,
+			tenantId: "ten_1",
+			scopes: ["agent:use"],
+			claims: {},
+			token: userId,
+			...(agent === undefined ? {} : { agent: { runtime: "svc_t10-automations", grantId: "grt_1", ...agent } }),
+		});
+		running = await startTestAgent({
+			authenticator: {
+				authenticate: async ({ headers }) =>
+					headers.authorization === "Bearer scheduled" ? principal("usr_1", { trigger: "schedule", automation: "au_brief" }) : principal("usr_1"),
+			},
+		});
+		const scheduled = await rpc(running.url, "scheduled", "session.create");
+		expect(scheduled.body.result!.origin).toEqual({ trigger: "schedule", automation: "au_brief" });
+		const typed = await rpc(running.url, "typed", "session.create");
+		expect(typed.body.result!.origin).toEqual({ trigger: "user" });
+		const listed = (await rpc(running.url, "typed", "session.list")).body.result!.sessions as { origin: unknown }[];
+		expect(listed.map((s) => s.origin)).toContainEqual({ trigger: "schedule", automation: "au_brief" });
+	});
+});

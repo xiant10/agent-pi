@@ -29,6 +29,10 @@ export type SessionState = {
 	origin?: { turnId: string; traceparent?: string };
 	/** Lives for one call, so nothing could read a background task's report. */
 	transient?: boolean;
+	/** Why the run that created it was running, from the token, when that wasn't a person: `schedule`, `event`, `webhook`. */
+	trigger?: string;
+	/** The automation that created it. */
+	automation?: string;
 } & JsonObject;
 
 export const SessionDoc = defineDoc<SessionState>({
@@ -60,7 +64,8 @@ export async function readSession(
  * One document per owner, listing their sessions, least recently active first. Per-owner, so listing and creating stay
  * O(own sessions). Only `sessions` counts against the owner's limit.
  */
-export const UserSessionsDoc = defineDocFamily<{ sessions: number[]; archived?: number[] } & JsonObject, null>({
+/** `created` maps each `Agent-Request-Id` an owner created a session with to that session, oldest first, bounded. */
+export const UserSessionsDoc = defineDocFamily<{ sessions: number[]; archived?: number[]; created?: Record<string, number> } & JsonObject, null>({
 	kind: "app.user-sessions",
 	version: 1,
 	family: true,

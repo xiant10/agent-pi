@@ -157,19 +157,25 @@ export class AgentService {
 
 	async createSession(
 		principal: Principal,
-		options: { readonly profile?: string; readonly metadata?: JsonObject; readonly transient?: boolean },
+		options: { readonly profile?: string; readonly metadata?: JsonObject; readonly transient?: boolean; readonly requestKey?: string },
 		context: Context,
 	): Promise<SessionInfo> {
 		const profile = this.#profile(options.profile);
-		const { conversation, sessionId } = await this.#deps.store.create(
+		const { conversation, sessionId, existing } = await this.#deps.store.create(
 			principal,
 			profile,
 			pinnedTools(profile, this.#deps.catalog),
 			options.metadata,
 			context,
 			options.transient,
+			options.requestKey,
 		);
 		this.#deps.credentials.set(conversation.id, principal);
+		if (existing) {
+			const earlier = await this.#deps.harness.snapshot(SessionDoc, conversation.id, context);
+			if (earlier === undefined) throw new Error(`session ${sessionId} vanished`);
+			return this.#deps.store.info(conversation.id, earlier);
+		}
 		this.#deps.log.info("session.created", { sessionId, owner: ownerKey(principal), profile: profile.name });
 		const session = await this.#deps.harness.snapshot(SessionDoc, conversation.id, context);
 		if (session === undefined) throw new Error(`session ${sessionId} vanished after creation`);

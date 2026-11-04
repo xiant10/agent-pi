@@ -21,7 +21,22 @@ export type SessionInfo = {
 	readonly metadata?: JsonObject;
 	/** What this session supports, so a client can hide what it doesn't. */
 	readonly capabilities: readonly string[];
+	/** Why it was started: `user` unless an automation's run created it. */
+	readonly origin: { readonly trigger: string; readonly automation?: string };
 };
+
+/** How many `Agent-Request-Id` keys an owner's index remembers. A repeat older than that creates a new session. */
+const CREATE_KEYS = 200;
+
+/** Thrown inside a create's transaction when the key was claimed meanwhile, so nothing is created. */
+class AlreadyCreated extends Error {
+	readonly conversationId: number;
+
+	constructor(conversationId: number) {
+		super("already created");
+		this.conversationId = conversationId;
+	}
+}
 
 export type ResolvedInstance = {
 	/** `<agent>.<replica>`, unique across agents even when they configure the same replica id. */
@@ -96,41 +111,76 @@ export class SessionStore {
 		metadata: JsonObject | undefined,
 		context: Context,
 		transient = false,
-	): Promise<{ readonly conversation: Conversation; readonly sessionId: string }> {
+		requestKey?: string,
+	): Promise<{ readonly conversation: Conversation; readonly sessionId: string; readonly existing: boolean }> {
 		const owner = ownerKey(principal);
-		const conversation = await this.#harness.createConversation(
-			{
-				ownership: { kind: "ownerless" },
-				agent: { model: profile.model, thinkingLevel: profile.thinkingLevel },
-				init: async (tx, id) => {
-					// A transient session lives for one call. Its owner never lists it, and a crash leaves it out of their way.
-					if (!transient) {
-						const sessions = await tx.doc(UserSessionsDoc, owner, null);
-						if (sessions.sessions.length >= this.#maxPerUser) {
-							throw rateLimited(`at most ${this.#maxPerUser} open sessions per user; archive or close one first`, 1);
+		// A repeat of a create answers the session the first one made, so a timer that fires twice makes one conversation.
+		if (requestKey !== undefined) {
+			const index = await this.#harness.snapshot(UserSessionsDoc, owner, context);
+			const earlier = index?.created?.[requestKey];
+			if (earlier !== undefined) return this.#existing(principal, earlier, context);
+		}
+		let conversation: Conversation;
+		try {
+			conversation = await this.#harness.createConversation(
+				{
+					ownership: { kind: "ownerless" },
+					agent: { model: profile.model, thinkingLevel: profile.thinkingLevel },
+					init: async (tx, id) => {
+						// A transient session lives for one call. Its owner never lists it, and a crash leaves it out of their way.
+						if (!transient) {
+							const sessions = await tx.doc(UserSessionsDoc, owner, null);
+							if (requestKey !== undefined) {
+								// Checked again here: a create racing this one with the same key may have won.
+								const won = sessions.created?.[requestKey];
+								if (won !== undefined) throw new AlreadyCreated(won);
+								const created = { ...(JSON.parse(JSON.stringify(sessions.created ?? {})) as Record<string, number>), [requestKey]: id };
+								for (const old of Object.keys(created).slice(0, Math.max(0, Object.keys(created).length - CREATE_KEYS))) delete created[old];
+								// Assigned whole: a document keeps a copy of a new object, so a write through the original would be lost.
+								sessions.created = created;
+							}
+							if (sessions.sessions.length >= this.#maxPerUser) {
+								throw rateLimited(`at most ${this.#maxPerUser} open sessions per user; archive or close one first`, 1);
+							}
+							sessions.sessions.push(id);
 						}
-						sessions.sessions.push(id);
-					}
-					const session = await tx.doc(SessionDoc, id);
-					session.owner = owner;
-					session.userId = principal.userId;
-					if (principal.displayName !== undefined) session.userName = principal.displayName;
-					if (principal.tenantId !== undefined) session.tenantId = principal.tenantId;
-					session.profile = profile.name;
-					session.createdAt = Date.now();
-					session.lastActiveAt = session.createdAt;
-					if (transient) session.transient = true;
-					if (metadata !== undefined) session.metadata = metadata;
-					// The exact offered set; unset would offer every installed tool, hundreds of them.
-					(await tx.doc(AgentDoc, id)).tools = [...pinnedTools];
-					await tx.doc(ToolStateDoc, id);
-					// Created now so the model hook finds the provider session id before the first request.
-					await tx.doc(ProviderDoc, id);
+						const session = await tx.doc(SessionDoc, id);
+						session.owner = owner;
+						session.userId = principal.userId;
+						if (principal.displayName !== undefined) session.userName = principal.displayName;
+						if (principal.tenantId !== undefined) session.tenantId = principal.tenantId;
+						session.profile = profile.name;
+						session.createdAt = Date.now();
+						session.lastActiveAt = session.createdAt;
+						if (transient) session.transient = true;
+						if (metadata !== undefined) session.metadata = metadata;
+						const trigger = principal.agent?.trigger;
+						if (trigger !== undefined && trigger !== "user") session.trigger = trigger;
+						if (principal.agent?.automation !== undefined) session.automation = principal.agent.automation;
+						// The exact offered set; unset would offer every installed tool, hundreds of them.
+						(await tx.doc(AgentDoc, id)).tools = [...pinnedTools];
+						await tx.doc(ToolStateDoc, id);
+						// Created now so the model hook finds the provider session id before the first request.
+						await tx.doc(ProviderDoc, id);
+					},
 				},
-			},
-			context,
-		);
-		return { conversation, sessionId: this.publicId(conversation.id) };
+				context,
+			);
+		} catch (error) {
+			if (error instanceof AlreadyCreated) return this.#existing(principal, error.conversationId, context);
+			throw error;
+		}
+		return { conversation, sessionId: this.publicId(conversation.id), existing: false };
+	}
+
+	/** The session an earlier create with the same key made, while its owner still has it open. */
+	async #existing(
+		principal: Principal,
+		conversationId: number,
+		context: Context,
+	): Promise<{ readonly conversation: Conversation; readonly sessionId: string; readonly existing: true }> {
+		const { conversation } = await this.require(principal, this.publicId(conversationId as ConversationId), context);
+		return { conversation, sessionId: this.publicId(conversation.id), existing: true };
 	}
 
 	/** The caller's sessions, most recently active first. The cursor is an offset, so activity can shift a later page by one. */
@@ -266,6 +316,7 @@ export class SessionStore {
 			...(session.archived === true ? { archived: true as const } : {}),
 			...(session.metadata === undefined ? {} : { metadata: session.metadata }),
 			capabilities: this.#capabilities,
+			origin: { trigger: session.trigger ?? "user", ...(session.automation === undefined ? {} : { automation: session.automation }) },
 		};
 	}
 }

@@ -173,6 +173,7 @@ export async function rpc(
 	token: string | undefined,
 	method: string,
 	params: Record<string, unknown> = {},
+	headers: Record<string, string> = {},
 ): Promise<RpcResponse> {
 	const response = await fetch(url, {
 		method: "POST",
@@ -180,6 +181,7 @@ export async function rpc(
 			"content-type": "application/json",
 			accept: "application/json",
 			...(token === undefined ? {} : { authorization: `Bearer ${token}` }),
+			...headers,
 		},
 		body: JSON.stringify({ jsonrpc: "2.0", id: nextId++, method, params }),
 	});

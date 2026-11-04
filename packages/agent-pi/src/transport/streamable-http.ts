@@ -13,6 +13,7 @@ import { validTraceparent } from "../util/tracing.ts";
 import { SseStream } from "./sse.ts";
 
 export const SESSION_HEADER = "agent-session-id";
+export const REQUEST_HEADER = "agent-request-id";
 /** Names the agent a call is for. A router uses it, and a harness refuses a name it doesn't serve. */
 export const AGENT_HEADER = "agent-name";
 /** A router needs it. A harness reads the method from the body. */
@@ -142,11 +143,13 @@ async function dispatch(
 			return { result: { agents: [{ name: options.agent }] } };
 		case "session.create": {
 			const metadata = params.metadata === undefined ? undefined : objectParam(params.metadata, "metadata");
+			const requestKey = createKey(req);
 			const info = await service.createSession(
 				principal,
 				{
 					...(params.profile === undefined ? {} : { profile: stringParam(params.profile, "profile") }),
 					...(metadata === undefined ? {} : { metadata }),
+					...(requestKey === undefined ? {} : { requestKey }),
 				},
 				context,
 			);
@@ -455,6 +458,14 @@ function promptOptions(params: Record<string, unknown>, req: IncomingMessage): P
 function headerSession(req: IncomingMessage): string | undefined {
 	const value = req.headers[SESSION_HEADER];
 	return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/** The key that makes a create idempotent, from `Agent-Request-Id`: a repeat answers the session the first one made. */
+function createKey(req: IncomingMessage): string | undefined {
+	const value = req.headers[REQUEST_HEADER];
+	if (value === undefined) return undefined;
+	if (typeof value !== "string" || !validTurnId(value)) throw invalidParams(`${REQUEST_HEADER} must be 1-128 characters of A-Z a-z 0-9 . _ : -`);
+	return value;
 }
 
 function sessionOf(req: IncomingMessage, params: Record<string, unknown>): string {

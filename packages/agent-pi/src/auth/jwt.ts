@@ -219,7 +219,16 @@ export class JwtAuthenticator implements Authenticator {
 			claims,
 			token,
 			...(typeof claims.exp === "number" ? { expiresAt: claims.exp * 1000 } : {}),
-			...(typeof runtime === "string" && typeof claims.grant === "string" ? { agent: { runtime, grantId: claims.grant } } : {}),
+			...(typeof runtime === "string" && typeof claims.grant === "string"
+				? {
+						agent: {
+							runtime,
+							grantId: claims.grant,
+							...(typeof claims.trg === "string" && claims.trg !== "" ? { trigger: claims.trg } : {}),
+							...(typeof claims.automation === "string" && claims.automation !== "" ? { automation: claims.automation } : {}),
+						},
+					}
+				: {}),
 		};
 	}
 

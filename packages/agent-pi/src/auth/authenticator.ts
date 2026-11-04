@@ -13,8 +13,11 @@ export type Principal = {
 	readonly token: string;
 	/** Epoch milliseconds after which `token` is dead. */
 	readonly expiresAt?: number;
-	/** Set on a delegated token: the runtime acting for the user, and the grant it acts under. */
-	readonly agent?: { readonly runtime: string; readonly grantId: string };
+	/**
+	 * Set on a delegated token: the runtime acting for the user, and the grant it acts under. `trigger` is why the run is
+	 * running, from the token's `trg`, and `automation` the automation that started it.
+	 */
+	readonly agent?: { readonly runtime: string; readonly grantId: string; readonly trigger?: string; readonly automation?: string };
 };
 
 /** What an authenticator may inspect: headers only, so auth runs before any body is read. */

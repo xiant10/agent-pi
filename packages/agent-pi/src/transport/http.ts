@@ -6,7 +6,7 @@ import type { AgentService } from "../service.ts";
 import type { Logger } from "../util/log.ts";
 import { traceIdOf } from "../util/tracing.ts";
 import type { McpEndpoint } from "./mcp.ts";
-import { AGENT_HEADER, handleStreamable, METHOD_HEADER, SESSION_HEADER, SUBMISSION_HEADER, toAppError, TRACE_HEADER, TURN_HEADER, writeJson } from "./streamable-http.ts";
+import { AGENT_HEADER, handleStreamable, METHOD_HEADER, REQUEST_HEADER, SESSION_HEADER, SUBMISSION_HEADER, toAppError, TRACE_HEADER, TURN_HEADER, writeJson } from "./streamable-http.ts";
 
 export type HttpOptions = {
 	readonly authenticator: Authenticator;
@@ -95,7 +95,7 @@ async function route(
 	if (req.method === "OPTIONS") {
 		res.writeHead(204, {
 			"access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
-			"access-control-allow-headers": `authorization, content-type, accept, last-event-id, mcp-session-id, mcp-protocol-version, ${SESSION_HEADER}, ${AGENT_HEADER}, ${METHOD_HEADER}, ${TURN_HEADER}, ${TRACE_HEADER}`,
+			"access-control-allow-headers": `authorization, content-type, accept, last-event-id, mcp-session-id, mcp-protocol-version, ${SESSION_HEADER}, ${AGENT_HEADER}, ${METHOD_HEADER}, ${TURN_HEADER}, ${TRACE_HEADER}, ${REQUEST_HEADER}`,
 			"access-control-max-age": "600",
 		});
 		res.end();
