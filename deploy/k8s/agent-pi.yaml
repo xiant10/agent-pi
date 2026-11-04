@@ -18,7 +18,7 @@ spec:
     app.kubernetes.io/name: agent-pi
   ports:
     - name: http
-      port: 9800
+      port: 18100
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -54,7 +54,7 @@ spec:
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
-              containerPort: 9800
+              containerPort: 18100
           env:
             - name: AGENT_INSTANCE_ID
               valueFrom:
@@ -63,7 +63,7 @@ spec:
             - name: AGENT_CONFIG
               value: /app/apps/assistant/config/agent.json
             - name: PORT
-              value: "9800"
+              value: "18100"
             - name: AGENT_DATA_DIR
               value: /data
             - name: AUTH_KIND
@@ -71,7 +71,7 @@ spec:
             - name: JWT_ALGORITHMS
               value: ES256
             - name: JWT_JWKS_URL
-              value: http://auth-server.t10.svc.cluster.local:8081/.well-known/jwks.json
+              value: http://auth-server.t10.svc.cluster.local:18000/.well-known/jwks.json
             - name: JWT_ISSUER
               value: https://auth.example.com
             # People's tokens carry t10, and a voice agent's grants agent-pi.
@@ -82,17 +82,24 @@ spec:
             - name: JWT_TENANT_CLAIM
               value: tid
             - name: AUTH_URL
-              value: http://auth-server.t10.svc.cluster.local:8081
+              value: http://auth-server.t10.svc.cluster.local:18000
             - name: LLM_BASE_URL
-              value: http://ai-gateway-llm.t10.svc.cluster.local:7200/v1
+              value: http://ai-gateway-llm.t10.svc.cluster.local:18080/v1
             # auth-server's clients.yaml has to allow these before this rolls out.
             # Through ai-gateway-tools, which checks and records every tool call.
             - name: COLLAB_MCP_URL
-              value: http://ai-gateway-tools.t10.svc.cluster.local:7202/mcp/collab
+              value: http://ai-gateway-tools.t10.svc.cluster.local:18095/mcp/collab
             - name: GRANT_ACTIONS
               value: agent:use,work:read,work:write
             - name: GRANT_AUDIENCES
               value: agent-pi,t10-collab,ai-gateway-tools
+            # Concurrency & capacity limits
+            - name: MAX_RUNS
+              value: "1000"
+            - name: MAX_RUNS_PER_USER
+              value: "20"
+            - name: MAX_SESSIONS_PER_USER
+              value: "1000"
           envFrom:
             - secretRef:
                 name: agent-pi

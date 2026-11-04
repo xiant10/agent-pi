@@ -83,10 +83,10 @@
 		{ "name": "collab", "transport": "http", "url": "${COLLAB_MCP_URL:-}", "auth": "grant", "prefix": "", "agentContext": true }
 	],
 	"limits": {
-		"maxSessionsPerUser": "${MAX_SESSIONS_PER_USER:-200}",
+		"maxSessionsPerUser": "${MAX_SESSIONS_PER_USER:-1000}",
 		"maxBodyBytes": "${MAX_BODY_BYTES:-16000000}",
-		"maxConcurrentRunsPerUser": "${MAX_RUNS_PER_USER:-3}",
-		"maxConcurrentRuns": "${MAX_RUNS:-200}"
+		"maxConcurrentRunsPerUser": "${MAX_RUNS_PER_USER:-20}",
+		"maxConcurrentRuns": "${MAX_RUNS:-1000}"
 	},
 	"http": { "path": "/agent", "allowedOrigins": "${ALLOWED_ORIGINS:-}" },
 	"durable": {
