@@ -156,4 +156,18 @@ describe("identity headers", () => {
 		expect(seen[0]).not.toHaveProperty("x-turn-id");
 		expect(seen[0]).not.toHaveProperty("x-session-id");
 	});
+
+	it("propagates every turn id without delay across concurrent prompts", async () => {
+		const { url, seen } = await startGateway();
+		const runs: RunContext[] = [];
+		const agentUrl = await start(url, runs);
+		const sessions = await Promise.all(
+			Array.from({ length: 3 }, async () => (await rpc(agentUrl, TOKENS.alice, "session.create", {})).body.result!.sessionId as string),
+		);
+		const answers = await Promise.all(
+			sessions.map((sessionId, index) => rpc(agentUrl, TOKENS.alice, "session.prompt", { sessionId, input: `hi ${index}`, turnId: `concurrent-${index}` })),
+		);
+		expect(answers.map((answer) => answer.body.result!.turnId)).toEqual(["concurrent-0", "concurrent-1", "concurrent-2"]);
+		expect(seen.map((headers) => headers["x-turn-id"]).sort()).toEqual(["concurrent-0", "concurrent-1", "concurrent-2"]);
+	});
 });

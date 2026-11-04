@@ -79,7 +79,7 @@ export function validTurnId(value: string): boolean {
  * The turn each submission belongs to, newest last; old ones are dropped. `traceparents` holds where that turn's work
  * goes in its trace. It is durable so a run resumed after a restart stays in its trace, and absent in older documents.
  */
-const TurnsDoc = defineDoc<{ bySubmission: Record<string, string>; traceparents?: Record<string, string> } & JsonObject>({
+export const TurnsDoc = defineDoc<{ bySubmission: Record<string, string>; traceparents?: Record<string, string> } & JsonObject>({
 	kind: "app.turns",
 	version: 1,
 	scope: "conversation",
@@ -91,6 +91,39 @@ const TurnsDoc = defineDoc<{ bySubmission: Record<string, string>; traceparents?
 
 const MAX_TURNS = 200;
 
+type TurnRecord = { readonly turnId: string; readonly traceparent?: string };
+
+/**
+ * Turns whose `recordTurn` commit is in flight, keyed by `<conversationId>:<submissionId>`, and waiters for inputs
+ * whose run started in the microtask before `submit()` returned to `recordTurn`. Once the commit finishes, `TurnsDoc`
+ * holds the record in memory.
+ */
+const pendingTurns = new Map<string, TurnRecord>();
+const turnWaiters = new Map<string, Set<() => void>>();
+
+function turnKey(conversationId: ConversationId, submissionId: number | string): string {
+	return `${conversationId}:${submissionId}`;
+}
+
+function waitForTurn(keys: readonly string[], ms: number): Promise<void> {
+	return new Promise((resolve) => {
+		const done = () => {
+			clearTimeout(timer);
+			for (const key of keys) turnWaiters.get(key)?.delete(done);
+			resolve();
+		};
+		const timer = setTimeout(done, ms);
+		for (const key of keys) {
+			let set = turnWaiters.get(key);
+			if (set === undefined) {
+				set = new Set();
+				turnWaiters.set(key, set);
+			}
+			set.add(done);
+		}
+	});
+}
+
 /** Remember `turnId` for a submission; a retry of the same submission keeps its first turn id, which is returned. */
 export function recordTurn(
 	conversation: Conversation,
@@ -99,21 +132,35 @@ export function recordTurn(
 	traceparent: string | undefined,
 	context: Context,
 ): Promise<string> {
-	return conversation.commit(async (tx) => {
-		const doc = await tx.doc(TurnsDoc, conversation.id);
-		const key = String(submissionId);
-		const existing = doc.bySubmission[key];
-		if (existing !== undefined) return existing;
-		doc.bySubmission[key] = turnId;
-		// Assigned whole: a document keeps a copy of a new object, so a write through the original would be lost.
-		if (traceparent !== undefined) doc.traceparents = { ...doc.traceparents, [key]: traceparent };
-		const keys = Object.keys(doc.bySubmission);
-		for (const old of keys.slice(0, Math.max(0, keys.length - MAX_TURNS))) {
-			delete doc.bySubmission[old];
-			if (doc.traceparents !== undefined) delete doc.traceparents[old];
+	const pendingKey = turnKey(conversation.id, submissionId);
+	const initialized = !pendingTurns.has(pendingKey);
+	if (initialized) {
+		pendingTurns.set(pendingKey, traceparent === undefined ? { turnId } : { turnId, traceparent });
+		const waiters = turnWaiters.get(pendingKey);
+		if (waiters !== undefined) {
+			turnWaiters.delete(pendingKey);
+			for (const wake of waiters) wake();
 		}
-		return turnId;
-	}, context);
+	}
+	return conversation
+		.commit(async (tx) => {
+			const doc = await tx.doc(TurnsDoc, conversation.id);
+			const key = String(submissionId);
+			const existing = doc.bySubmission[key];
+			if (existing !== undefined) return existing;
+			doc.bySubmission[key] = turnId;
+			// Assigned whole: a document keeps a copy of a new object, so a write through the original would be lost.
+			if (traceparent !== undefined) doc.traceparents = { ...doc.traceparents, [key]: traceparent };
+			const keys = Object.keys(doc.bySubmission);
+			for (const old of keys.slice(0, Math.max(0, keys.length - MAX_TURNS))) {
+				delete doc.bySubmission[old];
+				if (doc.traceparents !== undefined) delete doc.traceparents[old];
+			}
+			return turnId;
+		}, context)
+		.finally(() => {
+			if (initialized) pendingTurns.delete(pendingKey);
+		});
 }
 
 /** The input submissions with a known turn, newest last. Older ones have been dropped. */
@@ -153,21 +200,28 @@ export async function currentTurnRecord(
 		for (let at = inputs.length - 1; at >= 0; at--) {
 			const key = String(inputs[at]);
 			const turnId = turns?.bySubmission[key];
-			if (turnId === undefined) continue;
-			const traceparent = turns?.traceparents?.[key];
-			return traceparent === undefined ? { turnId } : { turnId, traceparent };
+			if (turnId !== undefined) {
+				const traceparent = turns?.traceparents?.[key];
+				return traceparent === undefined ? { turnId } : { turnId, traceparent };
+			}
+			const pending = pendingTurns.get(turnKey(conversationId, key));
+			if (pending !== undefined) return pending;
 		}
-		await new Promise((resolve) => setTimeout(resolve, 25));
+		await waitForTurn(
+			inputs.map((input) => turnKey(conversationId, input)),
+			25,
+		);
 	}
 	return undefined;
 }
 
 /** The turn recorded for an input. `recordTurn` runs just after admission, so wait for it briefly, as `currentTurn` does. */
 export async function turnOfInput(reader: Harness, conversationId: ConversationId, input: number, context: Context): Promise<string | undefined> {
+	const key = turnKey(conversationId, input);
 	for (let attempt = 0; attempt < 12; attempt++) {
-		const turnId = (await recordedTurns(reader, conversationId, context)).get(input);
+		const turnId = (await recordedTurns(reader, conversationId, context)).get(input) ?? pendingTurns.get(key)?.turnId;
 		if (turnId !== undefined) return turnId;
-		await new Promise((resolve) => setTimeout(resolve, 25));
+		await waitForTurn([key], 25);
 	}
 	return undefined;
 }

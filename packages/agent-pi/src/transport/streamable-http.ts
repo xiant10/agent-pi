@@ -273,7 +273,11 @@ async function streamRun(
 	const sessionId = sessionOf(req, params);
 	const hub = await service.hub(principal, sessionId, BACKGROUND_CONTEXT);
 
+	const earlyHeaders = req.headers["agent-early-headers"] === "true" || params.earlyHeaders === true;
 	let sse: SseStream | undefined;
+	if (earlyHeaders) {
+		sse = new SseStream(res, options.keepAliveMs, { [SESSION_HEADER]: sessionId });
+	}
 	const pending: ClientEvent[] = [];
 	let lastEventId: string | undefined;
 	let ours: number | undefined;
@@ -317,12 +321,16 @@ async function streamRun(
 				? await service.interrupt(principal, sessionId, params.input, prompt, context)
 				: await service.prompt(principal, sessionId, params.input, prompt, context);
 		if (admitted === undefined) {
-			writeJson(res, 200, { jsonrpc: "2.0", id, result: { aborted: true } });
+			if (sse === undefined) writeJson(res, 200, { jsonrpc: "2.0", id, result: { aborted: true } });
+			else {
+				sse.send({ jsonrpc: "2.0", id, result: { aborted: true } });
+				sse.end();
+			}
 			return;
 		}
 		if (admitted.kind === "reply") {
 			const arrived = pending.some((event) => event.body.type === "message.end" && event.body.source !== undefined);
-			const stream = new SseStream(res, options.keepAliveMs, { [SESSION_HEADER]: sessionId });
+			const stream = sse ?? new SseStream(res, options.keepAliveMs, { [SESSION_HEADER]: sessionId });
 			sse = stream;
 			for (const event of pending.splice(0)) stream.send(notification(sessionId, event), event.id);
 			// A placed reply's events come from the commit that wrote it; give them a moment to arrive before answering.
@@ -338,7 +346,7 @@ async function streamRun(
 			return;
 		}
 		ours = admitted.submission.id;
-		const stream = new SseStream(res, options.keepAliveMs, { [SESSION_HEADER]: sessionId, [SUBMISSION_HEADER]: String(ours) });
+		const stream = sse ?? new SseStream(res, options.keepAliveMs, { [SESSION_HEADER]: sessionId, [SUBMISSION_HEADER]: String(ours) });
 		sse = stream;
 		for (const event of pending.splice(0)) stream.send(notification(sessionId, event), event.id);
 		stream.onClose(() => {
@@ -350,9 +358,13 @@ async function streamRun(
 		if (settledIds.has(ours)) resolveSettled();
 
 		// Normally the stream reports settlement first; `wait()` covers a stream that resynced past it.
+		let settledRecord: SubmissionRecord | undefined;
 		const waited = admitted.submission
 			.wait(BACKGROUND_CONTEXT)
-			.then((record) => new Promise<typeof record>((resolve) => setTimeout(() => resolve(record), DRAIN_MS).unref()));
+			.then((record) => {
+				settledRecord = record;
+				return new Promise<typeof record>((resolve) => setTimeout(() => resolve(record), DRAIN_MS).unref());
+			});
 		// A client that left stops this wait; the run goes on unless it asked for `abortOnDisconnect`.
 		const closed = new Promise<void>((resolve) => stream.onClose(resolve));
 		await Promise.race([settledSignal, waited, closed]);
@@ -362,7 +374,7 @@ async function streamRun(
 			stream.end();
 			return;
 		}
-		const record = await admitted.submission.status(BACKGROUND_CONTEXT);
+		const record = settledRecord ?? (await admitted.submission.status(BACKGROUND_CONTEXT));
 		const text = await service.answerText(admitted.conversationId, record);
 		const outcome = settledIds.get(ours) ?? outcomeOf(record);
 		stream.send({ jsonrpc: "2.0", id, result: { turnId: admitted.turnId, submissionId: ours, ...outcome, ...(text === undefined ? {} : { text }) } }, lastEventId);

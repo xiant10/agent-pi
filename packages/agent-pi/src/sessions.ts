@@ -3,9 +3,11 @@ import type { Context } from "@earendil-works/chord";
 import { AgentDoc, type Conversation, type ConversationId, type Harness, type JsonObject, ProviderDoc } from "@earendil-works/pi-durable";
 import { InstanceDoc, SessionDoc, type SessionState, ToolStateDoc, UserSessionsDoc } from "./agent/docs.ts";
 import type { Profile } from "./agent/profiles.ts";
+import { TasksDoc } from "./agent/tasks.ts";
 import { ownerKey, type Principal } from "./auth/authenticator.ts";
 import type { StoredGrant } from "./auth/grants.ts";
 import { AppError, RPC, rateLimited, sessionNotFound } from "./errors.ts";
+import { TurnsDoc } from "./identity.ts";
 
 /** Fields of a session its owner can change after creation. */
 export type SessionChanges = { readonly title?: string; readonly pinned?: boolean; readonly archived?: boolean };
@@ -79,6 +81,7 @@ export class SessionStore {
 	readonly #legacyId: string | undefined;
 	readonly #maxPerUser: number;
 	readonly #capabilities: readonly string[];
+	readonly #conversations = new Map<ConversationId, Conversation>();
 
 	constructor(harness: Harness, instance: ResolvedInstance, maxPerUser: number, capabilities: readonly string[]) {
 		this.#harness = harness;
@@ -162,6 +165,9 @@ export class SessionStore {
 						await tx.doc(ToolStateDoc, id);
 						// Created now so the model hook finds the provider session id before the first request.
 						await tx.doc(ProviderDoc, id);
+						// Warmed now so prompts and event hubs read them from memory without negative lookups or setup commits.
+						await tx.doc(TasksDoc, id);
+						await tx.doc(TurnsDoc, id);
 					},
 				},
 				context,
@@ -170,6 +176,7 @@ export class SessionStore {
 			if (error instanceof AlreadyCreated) return this.#existing(principal, error.conversationId, context);
 			throw error;
 		}
+		this.#conversations.set(conversation.id, conversation);
 		return { conversation, sessionId: this.publicId(conversation.id), existing: false };
 	}
 
@@ -193,17 +200,24 @@ export class SessionStore {
 		const ids = [...((options.archived === true ? index?.archived : index?.sessions) ?? [])].reverse();
 		const start = options.cursor ?? 0;
 		const end = options.limit === undefined ? ids.length : Math.min(ids.length, start + options.limit);
+		const loaded = await Promise.all(
+			ids.slice(start, end).map(async (id) => ({
+				id: id as ConversationId,
+				session: await this.#harness.snapshot(SessionDoc, id as ConversationId, context),
+			})),
+		);
 		const sessions: SessionInfo[] = [];
-		for (const id of ids.slice(start, end)) {
-			const session = await this.#harness.snapshot(SessionDoc, id as ConversationId, context);
+		for (const { id, session } of loaded) {
 			if (session === undefined || session.closed === true) continue;
-			sessions.push(this.info(id as ConversationId, session));
+			sessions.push(this.info(id, session));
 		}
 		return { sessions, ...(end < ids.length ? { nextCursor: String(end) } : {}) };
 	}
 
 	/** Note new input: the session moves to the top of its owner's list. */
 	async touch(principal: Principal, conversationId: ConversationId, context: Context): Promise<void> {
+		const current = await this.#harness.snapshot(SessionDoc, conversationId, context);
+		if (current === undefined || current.transient === true || current.parent !== undefined) return;
 		await this.#harness.commit(async (tx) => {
 			const session = await tx.doc(SessionDoc, conversationId);
 			session.lastActiveAt = Date.now();
@@ -250,6 +264,15 @@ export class SessionStore {
 		return this.info(conversation.id, updated);
 	}
 
+	/** The conversation handle for `conversationId`, cached in memory once loaded. */
+	async conversation(conversationId: ConversationId, context: Context): Promise<Conversation | undefined> {
+		const cached = this.#conversations.get(conversationId);
+		if (cached !== undefined) return cached;
+		const loaded = await this.#harness.conversation(conversationId, context);
+		if (loaded !== undefined) this.#conversations.set(conversationId, loaded);
+		return loaded;
+	}
+
 	/** The caller's open session, or `session_not_found`. */
 	async require(
 		principal: Principal,
@@ -261,7 +284,7 @@ export class SessionStore {
 		if (session === undefined || session.owner !== ownerKey(principal) || session.closed === true || session.parent !== undefined) {
 			throw sessionNotFound();
 		}
-		const conversation = await this.#harness.conversation(conversationId, context);
+		const conversation = await this.conversation(conversationId, context);
 		if (conversation === undefined) throw sessionNotFound();
 		return { conversation, session };
 	}
@@ -281,7 +304,7 @@ export class SessionStore {
 			const parent = await this.#harness.snapshot(SessionDoc, session.parent as ConversationId, context);
 			if (parent === undefined || parent.closed === true) throw sessionNotFound();
 		}
-		const conversation = await this.#harness.conversation(conversationId, context);
+		const conversation = await this.conversation(conversationId, context);
 		if (conversation === undefined) throw sessionNotFound();
 		return { conversation, session };
 	}
@@ -298,6 +321,7 @@ export class SessionStore {
 
 	/** Mark closed and drop from the owner's index. The transcript stays in storage. */
 	async markClosed(principal: Principal, conversationId: ConversationId, context: Context): Promise<void> {
+		this.#conversations.delete(conversationId);
 		await this.#harness.commit(async (tx) => {
 			(await tx.doc(SessionDoc, conversationId)).closed = true;
 			const index = await tx.doc(UserSessionsDoc, ownerKey(principal), null);

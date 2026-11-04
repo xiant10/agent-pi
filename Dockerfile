@@ -20,13 +20,13 @@ COPY packages/agent-pi/src packages/agent-pi/src
 RUN mkdir -p /data && chown node:node /data
 VOLUME /data
 ENV AGENT_DATA_DIR=/data \
-    PORT=9800
+    PORT=18100
 
 USER node
-EXPOSE 9800
+EXPOSE 18100
 
 HEALTHCHECK --interval=15s --timeout=3s --start-period=20s --retries=3 \
-    CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||9800)+'/readyz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"
+    CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||18100)+'/readyz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"
 
 # SIGTERM ends event streams, finishes commits, and closes storage; give it time before SIGKILL (compose: stop_grace_period).
 STOPSIGNAL SIGTERM

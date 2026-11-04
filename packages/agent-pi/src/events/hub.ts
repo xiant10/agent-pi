@@ -292,12 +292,16 @@ export class HubRegistry {
 		this.#log = log;
 	}
 
-	async get(conversationId: ConversationId, mapping: HubMapping): Promise<SessionHub> {
+	async existing(conversationId: ConversationId): Promise<SessionHub | undefined> {
 		const existing = this.#hubs.get(conversationId);
-		if (existing !== undefined) {
-			const hub = await existing;
-			if (!hub.stopped) return hub;
-		}
+		if (existing === undefined) return undefined;
+		const hub = await existing;
+		return hub.stopped ? undefined : hub;
+	}
+
+	async get(conversationId: ConversationId, mapping: HubMapping): Promise<SessionHub> {
+		const hub = await this.existing(conversationId);
+		if (hub !== undefined) return hub;
 		const opening = SessionHub.open(this.#harness, conversationId, mapping, this.#options, this.#log, () => {
 			if (this.#hubs.get(conversationId) === opening) this.#hubs.delete(conversationId);
 		});

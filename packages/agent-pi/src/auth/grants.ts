@@ -58,10 +58,13 @@ export class GrantBroker {
 	readonly #now: () => number;
 	readonly #retryDelayMs: number;
 	readonly #byConversation = new Map<ConversationId, StoredGrant>();
+	readonly #attaching = new Map<ConversationId, { readonly key: string; readonly promise: Promise<StoredGrant> }>();
 	readonly #tokens = new Map<string, Cached>();
 	readonly #minting = new Map<string, Promise<string>>();
 	readonly #confirmed = new Map<string, number>();
+	readonly #confirming = new Map<string, Promise<void>>();
 	#service: Cached | undefined;
+	#serviceInFlight: Promise<string> | undefined;
 	#read: ((conversationId: ConversationId) => Promise<StoredGrant | undefined>) | undefined;
 
 	constructor(config: GrantsConfig, options: GrantBrokerOptions = {}) {
@@ -88,14 +91,29 @@ export class GrantBroker {
 		traceparent?: string,
 	): Promise<StoredGrant> {
 		const parent = typeof principal.claims.grant === "string" ? principal.claims.grant : undefined;
-		const current = stored ?? this.#byConversation.get(conversationId);
-		let grant: StoredGrant | undefined;
-		if (current !== undefined && current.parent === parent) {
-			grant = parent === undefined ? await this.#extended(current, principal, traceparent) : current;
+		const key = `${parent ?? ""}:${principal.token ?? ""}`;
+		const active = this.#attaching.get(conversationId);
+		if (active !== undefined) {
+			if (active.key === key && traceparent === undefined) return active.promise;
+			await active.promise.catch(() => undefined);
 		}
-		grant ??= await this.#open(principal, parent, traceparent);
-		this.#byConversation.set(conversationId, grant);
-		return grant;
+		const run = (async () => {
+			const current = this.#byConversation.get(conversationId) ?? stored;
+			let grant: StoredGrant | undefined;
+			if (current !== undefined && current.parent === parent) {
+				grant = parent === undefined ? await this.#extended(current, principal, traceparent) : current;
+			}
+			grant ??= await this.#open(principal, parent, traceparent);
+			this.#byConversation.set(conversationId, grant);
+			return grant;
+		})();
+		const entry = { key, promise: run };
+		this.#attaching.set(conversationId, entry);
+		try {
+			return await run;
+		} finally {
+			if (this.#attaching.get(conversationId) === entry) this.#attaching.delete(conversationId);
+		}
 	}
 
 	async #extended(current: StoredGrant, principal: Principal, traceparent?: string): Promise<StoredGrant | undefined> {
@@ -226,31 +244,51 @@ export class GrantBroker {
 	 * Throw unless a delegated token's grant and its ancestors are live. A token outlives a revocation by up to its
 	 * 5 minutes, and this is what cuts that to a minute. Only a live answer is remembered, so an outage refuses.
 	 */
-	async confirmChain(grantId: string): Promise<void> {
+	confirmChain(grantId: string): Promise<void> {
 		const confirmed = this.#confirmed.get(grantId);
-		if (confirmed !== undefined && this.#now() - confirmed < CHAIN_CACHE_MS) return;
+		if (confirmed !== undefined && this.#now() - confirmed < CHAIN_CACHE_MS) return Promise.resolve();
+		const inFlight = this.#confirming.get(grantId);
+		if (inFlight !== undefined) return inFlight;
 		this.#confirmed.delete(grantId);
-		const service = await this.#serviceToken();
-		let response: Response;
-		try {
-			response = await this.#fetch(`${this.#config.url}/v1/grants/${encodeURIComponent(grantId)}/chain`, {
-				headers: { authorization: `Bearer ${service}` },
-				signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-			});
-		} catch (error) {
-			throw new GrantError("unavailable", error instanceof Error ? error.message : String(error));
-		}
-		if (response.status >= 500) throw new GrantError("unavailable", `the auth service answered ${response.status}`);
-		if (!response.ok) throw new GrantError("stopped", "the grant is no longer live");
-		for (const [id, at] of this.#confirmed) if (this.#now() - at >= CHAIN_CACHE_MS) this.#confirmed.delete(id);
-		this.#confirmed.set(grantId, this.#now());
+		const check = (async () => {
+			try {
+				const service = await this.#serviceToken();
+				let response: Response;
+				try {
+					response = await this.#fetch(`${this.#config.url}/v1/grants/${encodeURIComponent(grantId)}/chain`, {
+						headers: { authorization: `Bearer ${service}` },
+						signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+					});
+				} catch (error) {
+					throw new GrantError("unavailable", error instanceof Error ? error.message : String(error));
+				}
+				if (response.status >= 500) throw new GrantError("unavailable", `the auth service answered ${response.status}`);
+				if (!response.ok) throw new GrantError("stopped", "the grant is no longer live");
+				for (const [id, at] of this.#confirmed) if (this.#now() - at >= CHAIN_CACHE_MS) this.#confirmed.delete(id);
+				this.#confirmed.set(grantId, this.#now());
+			} finally {
+				this.#confirming.delete(grantId);
+			}
+		})();
+		this.#confirming.set(grantId, check);
+		return check;
 	}
 
-	async #serviceToken(): Promise<string> {
-		if (this.#service === undefined || this.#service.expiresAt - this.#now() <= RENEW_BEFORE_MS) {
-			this.#service = await this.#tokenRequest({ grant_type: "client_credentials" });
+	#serviceToken(): Promise<string> {
+		if (this.#service !== undefined && this.#service.expiresAt - this.#now() > RENEW_BEFORE_MS) {
+			return Promise.resolve(this.#service.token);
 		}
-		return this.#service.token;
+		if (this.#serviceInFlight !== undefined) return this.#serviceInFlight;
+		const flight = (async () => {
+			try {
+				this.#service = await this.#tokenRequest({ grant_type: "client_credentials" });
+				return this.#service.token;
+			} finally {
+				this.#serviceInFlight = undefined;
+			}
+		})();
+		this.#serviceInFlight = flight;
+		return flight;
 	}
 
 	async #serviceCall(path: string, body: unknown, traceparent?: string): Promise<Record<string, unknown>> {

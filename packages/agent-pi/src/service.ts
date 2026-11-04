@@ -146,6 +146,7 @@ export type SessionTask = {
  */
 export class AgentService {
 	readonly #deps: ServiceDeps;
+	readonly #answers = new Map<string, Promise<string | undefined>>();
 
 	constructor(deps: ServiceDeps) {
 		this.#deps = deps;
@@ -203,7 +204,7 @@ export class AgentService {
 		const info = await this.#deps.store.update(principal, sessionId, changes, context);
 		if (changes.archived === true) {
 			// Out of the way means nothing still spending. Archived first, so nothing new starts while these stop.
-			const conversation = await this.#deps.harness.conversation(this.#deps.store.parseId(sessionId), context);
+			const conversation = await this.#deps.store.conversation(this.#deps.store.parseId(sessionId), context);
 			await conversation?.abort(context, { background: true });
 		}
 		return info;
@@ -264,10 +265,16 @@ export class AgentService {
 
 	/** Which turn and request wrote each user entry. Turns are kept for the newest inputs only. */
 	async #inputs(conversationId: ConversationId, context: Context): Promise<Map<number, { turnId: string; requestId?: string }>> {
+		const turns = await recordedTurns(this.#deps.harness, conversationId, context);
+		const records = await Promise.all(
+			[...turns].map(async ([id, turnId]) => {
+				const submission = await this.#deps.harness.submission(id as SubmissionId, context);
+				const record = await submission?.status(context);
+				return { turnId, record };
+			}),
+		);
 		const inputs = new Map<number, { turnId: string; requestId?: string }>();
-		for (const [id, turnId] of await recordedTurns(this.#deps.harness, conversationId, context)) {
-			const submission = await this.#deps.harness.submission(id as SubmissionId, context);
-			const record = await submission?.status(context);
+		for (const { turnId, record } of records) {
 			if (record?.entry === undefined) continue;
 			inputs.set(record.entry, { turnId, ...(record.requestId === undefined ? {} : { requestId: record.requestId }) });
 		}
@@ -419,6 +426,8 @@ export class AgentService {
 		const tasks = await this.#deps.harness.snapshot(TasksDoc, conversation.id, context);
 		if (tasks === undefined || tasks.nextId === 1) return;
 		const attendedTokens = await tokensSpent(this.#deps.harness, conversation.id, tasks, context);
+		const needsHeard = tasks.tasks.some((task) => task.status !== "working" && task.heardAt === undefined);
+		if (tasks.unattended === 0 && tasks.attendedTokens === attendedTokens && !needsHeard) return;
 		await conversation.commit(async (tx) => {
 			const state = await tx.doc(TasksDoc, conversation.id);
 			Object.assign(state, { unattended: 0, attendedTokens });
@@ -473,12 +482,32 @@ export class AgentService {
 				? [...new Set([...routed, ...preloadTools(textOf(submitted), profile, this.#deps.catalog, this.#deps.skills)])]
 				: [];
 		const state = await this.#deps.harness.snapshot(ToolStateDoc, conversation.id, context);
-		const hasSkills = earlier === undefined && Object.keys(state?.skills ?? {}).length > 0;
-		if (preload.length > 0 || hasSkills) {
-			const policy = { pinned: pinnedTools(profile, this.#deps.catalog), maxActive: profile.maxActiveTools };
+		const hasSkills =
+			earlier === undefined &&
+			Object.entries(state?.skills ?? {}).some(([skill, known]) => (this.#skillTools(skill) ?? []).some((name) => !known.includes(name)));
+		const pinned = pinnedTools(profile, this.#deps.catalog);
+		let needsPreload = preload.length > 0;
+		if (needsPreload && !hasSkills) {
+			const agent = await this.#deps.harness.snapshot(AgentDoc, conversation.id, context);
+			const offered = agent?.tools;
+			const pinnedSet = new Set(pinned);
+			const dynamicPreload = preload.filter((name) => !pinnedSet.has(name));
+			const dynamic = state?.dynamic ?? [];
+			const tailOffset = dynamic.length - dynamicPreload.length;
+			if (
+				Array.isArray(offered) &&
+				preload.every((name) => offered.includes(name)) &&
+				tailOffset >= 0 &&
+				dynamicPreload.every((name, i) => dynamic[tailOffset + i] === name)
+			) {
+				needsPreload = false;
+			}
+		}
+		if (needsPreload || hasSkills) {
+			const policy = { pinned, maxActive: profile.maxActiveTools };
 			const { refreshed, preloaded } = await conversation.commit(async (tx) => {
 				const refreshed = hasSkills ? (await refreshSkills(tx, conversation.id, this.#skillTools, policy)).added : [];
-				const preloaded = preload.length > 0 ? (await activateTools(tx, conversation.id, preload, policy)).added : [];
+				const preloaded = needsPreload ? (await activateTools(tx, conversation.id, preload, policy)).added : [];
 				return { refreshed, preloaded };
 			}, context);
 			if (refreshed.length > 0) this.#deps.log.debug("tools.skill_refreshed", { sessionId, added: refreshed });
@@ -501,9 +530,11 @@ export class AgentService {
 				context,
 			);
 			// A retry keeps the turn its first attempt recorded.
-			const turn = await recordTurn(conversation, submission.id, turnId, span?.traceparent ?? options.traceparent, context);
+			const [turn, record] = await Promise.all([
+				recordTurn(conversation, submission.id, turnId, span?.traceparent ?? options.traceparent, context),
+				submission.status(context),
+			]);
 			if (earlier === undefined) this.#afterRun(conversation.id, session, submission, turn);
-			const record = await submission.status(context);
 			const placement = record.status === "queued" ? "queued" : "placed";
 			if (earlier === undefined && placement === "placed" && this.#deps.acknowledgement !== undefined) {
 				const abort = new AbortController();
@@ -628,6 +659,8 @@ export class AgentService {
 		const { conversation, session } = await this.#deps.store.readable(principal, sessionId, context);
 		const child = session.parent !== undefined;
 		if (!child) this.#deps.credentials.set(conversation.id, principal);
+		const active = await this.#deps.hubs.existing(conversation.id);
+		if (active !== undefined) return active;
 		// A hub can only watch a document that exists, and this one may not until the first task.
 		if (!child && (await this.#deps.harness.snapshot(TasksDoc, conversation.id, context)) === undefined) {
 			await conversation.commit(async (tx) => {
@@ -675,9 +708,21 @@ export class AgentService {
 	/** Final answer text of a settled input, for clients that want it in the response. */
 	async answerText(conversationId: ConversationId, settled: SubmissionRecord): Promise<string | undefined> {
 		if (settled.status !== "done" || settled.type !== "input") return undefined;
-		const conversation = await this.#deps.harness.conversation(conversationId, BACKGROUND_CONTEXT);
-		const entry = await conversation?.commit((tx) => tx.entry(AssistantEntry, settled.answer), BACKGROUND_CONTEXT);
-		return assistantText(entry?.model?.[0]);
+		const key = `${conversationId}:${settled.answer}`;
+		const cached = this.#answers.get(key);
+		if (cached !== undefined) return cached;
+		const lookup = (async () => {
+			const conversation = await this.#deps.store.conversation(conversationId, BACKGROUND_CONTEXT);
+			const entry = await conversation?.commit((tx) => tx.entry(AssistantEntry, settled.answer), BACKGROUND_CONTEXT);
+			return assistantText(entry?.model?.[0]);
+		})();
+		this.#answers.set(key, lookup);
+		if (this.#answers.size > 500) {
+			const oldest = this.#answers.keys().next().value;
+			if (oldest !== undefined) this.#answers.delete(oldest);
+		}
+		lookup.catch(() => this.#answers.delete(key));
+		return lookup;
 	}
 
 	/** A background task started a run. Plugins see it as they see a prompted one; a crash can show it to them twice. */

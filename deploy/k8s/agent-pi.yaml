@@ -95,11 +95,11 @@ spec:
               value: agent-pi,t10-collab,ai-gateway-tools
             # Concurrency & capacity limits
             - name: MAX_RUNS
-              value: "1000"
+              value: "1500"
             - name: MAX_RUNS_PER_USER
-              value: "20"
+              value: "1500"
             - name: MAX_SESSIONS_PER_USER
-              value: "1000"
+              value: "2000"
           envFrom:
             - secretRef:
                 name: agent-pi
@@ -107,10 +107,16 @@ spec:
             httpGet:
               path: /readyz
               port: http
+            timeoutSeconds: 5
+            periodSeconds: 10
+            failureThreshold: 5
           livenessProbe:
             httpGet:
               path: /healthz
               port: http
+            timeoutSeconds: 5
+            periodSeconds: 10
+            failureThreshold: 6
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

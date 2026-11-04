@@ -33,6 +33,7 @@ class FakeAuth {
 	readonly stopped = new Set<string>();
 	readonly expired = new Set<string>();
 	mints = 0;
+	serviceMints = 0;
 	chainReads = 0;
 	readonly traces: string[] = [];
 	down = 0;
@@ -48,6 +49,7 @@ class FakeAuth {
 		}
 		const refuse = (code: string) => Response.json({ error: code }, { status: 400 });
 		if (url.pathname === "/v1/token" && body.grant_type === "client_credentials") {
+			this.serviceMints++;
 			return Response.json({ access_token: "service-token", expires_in: 300 });
 		}
 		if (url.pathname === "/v1/token") {
@@ -205,6 +207,16 @@ describe("GrantBroker", () => {
 		expect(auth.mints).toBe(1);
 	});
 
+	it("coalesces concurrent service token and attach requests for the same session", async () => {
+		const auth = new FakeAuth();
+		const grants = broker(auth);
+		const attached = await Promise.all(Array.from({ length: 10 }, () => grants.attach(CONVERSATION, undefined, user())));
+		expect(new Set(attached.map((grant) => grant.grantId)).size).toBe(1);
+		expect(auth.serviceMints).toBe(1);
+		expect(auth.created).toHaveLength(1);
+		expect(auth.extended).toHaveLength(0);
+	});
+
 	it("reports a stopped and an expired grant apart, and drops the cached token", async () => {
 		const auth = new FakeAuth();
 		auth.expiresIn = 30;
@@ -268,6 +280,14 @@ describe("confirmChain", () => {
 		auth.down = 1;
 		await expect(grants.confirmChain("grt_1")).rejects.toMatchObject({ reason: "unavailable" });
 		await grants.confirmChain("grt_1");
+	});
+
+	it("reads the chain once for a concurrent burst", async () => {
+		const auth = new FakeAuth();
+		const grants = broker(auth);
+		await Promise.all(Array.from({ length: 10 }, () => grants.confirmChain("grt_burst")));
+		expect(auth.serviceMints).toBe(1);
+		expect(auth.chainReads).toBe(1);
 	});
 });
 
