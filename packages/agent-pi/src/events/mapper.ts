@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import type { AgentEvent, MessageChange, SnapshotEvent } from "@earendil-works/pi-durable";
+import type { FlowRunTrace } from "../flow/types.ts";
 import type { ProgressEvent } from "./progress.ts";
 import { SpeechSegmenter } from "./speech.ts";
 
@@ -17,7 +18,7 @@ export type PartialMessage = MessageRef & { text: string };
 /** What a client receives in each `session/event` notification. */
 export type ClientEventBody =
 	| ProgressEvent
-	| { type: "snapshot"; busy: boolean; activeTools: string[]; inbox: { id: number; mode: string }[]; tasks: TaskStatus[]; progress?: ProgressEvent; partial?: PartialMessage }
+	| { type: "snapshot"; busy: boolean; activeTools: string[]; inbox: { id: number; mode: string }[]; tasks: TaskStatus[]; flow?: FlowRunTrace; progress?: ProgressEvent; partial?: PartialMessage }
 	| { type: "run.started"; submissionIds: number[] }
 	| { type: "run.finished"; submissionIds: number[] }
 	/** `offset`: where `text` starts in the message's text, to spot a gap or a duplicate. */
@@ -31,6 +32,8 @@ export type ClientEventBody =
 	| { type: "tools.active"; names: string[] }
 	/** A background task started or changed status. */
 	| ({ type: "task.updated" } & TaskStatus)
+	/** A deterministic or guided skill workflow updated its step trace. */
+	| { type: "flow.updated"; trace: FlowRunTrace }
 	| { type: "inbox"; items: { id: number; mode: string }[] }
 	| { type: "submission"; submissionId: number; status: string; reason?: string; detail?: string }
 	| { type: "retry"; attempt: number; at: number; error: string }

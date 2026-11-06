@@ -1,0 +1,210 @@
+{
+	"id": "customer-visit-preparation",
+	"title": "Customer Visit Preparation Flow",
+	"titleZh": "客户拜访准备确定性工作流",
+	"mode": "deterministic",
+	"triggerKeywords": ["拜访", "见客户", "沟通材料", "拜访简报", "拜访准备", "客户背景"],
+	"nodes": [
+		{
+			"id": "start",
+			"kind": "start",
+			"label": "Visit Prep Request",
+			"labelZh": "客户拜访请求",
+			"description": "Extract customer clue, visit purpose, and relationship-only flag",
+			"descriptionZh": "接收客户名称/联系人线索与拜访目标"
+		},
+		{
+			"id": "extract_target",
+			"kind": "extract",
+			"label": "Extract Target & Intent",
+			"labelZh": "提取客户线索与拜访意图",
+			"description": "Zero-LLM slot extraction for company query, pricing interest, and visit type",
+			"descriptionZh": "毫秒级提取目标企业名称、是否关注报价及是否纯关系维护",
+			"extract": {
+				"company": {
+					"pattern": "(?:拜访|见|关于|准备|准备一下|调研)\\s*([\\u4e00-\\u9fa5A-Za-z0-9]{2,20}?)(?:的|公司|集团|客户|拜访|简报|$)",
+					"fallbackInput": true
+				},
+				"relationshipOnly": {
+					"keywords": {
+						"纯关系维护": true,
+						"不讨论产品": true
+					},
+					"default": false
+				},
+				"includeQuote": {
+					"keywords": {
+						"报价": true,
+						"价格": true,
+						"预算": true,
+						"多少钱": true
+					},
+					"default": false
+				}
+			}
+		},
+		{
+			"id": "lookup_company",
+			"kind": "tool",
+			"label": "Identify Customer (CRM)",
+			"labelZh": "CRM 客户识别与检索",
+			"description": "Search CRM companies to verify identity or detect multiple candidates",
+			"descriptionZh": "调用 list_companies 核验客户唯一身份或发现多候选同名企业",
+			"tools": ["list_companies", "list_contacts"],
+			"call": {
+				"tool": "list_companies",
+				"args": {
+					"query": "$vars.company"
+				},
+				"storeAs": "lookup"
+			}
+		},
+		{
+			"id": "check_candidates",
+			"kind": "switch",
+			"label": "Disambiguation Gate",
+			"labelZh": "客户消歧与分支路由",
+			"description": "Route based on CRM match count (>1 candidates, 1 unique match, or 0 found)",
+			"descriptionZh": "按匹配数量自动分流：多候选暂停确认、唯一匹配拉取 CRM 事实、查无直接进产品匹配",
+			"branches": [
+				{
+					"id": "multiple",
+					"label": "> 1 candidates",
+					"labelZh": "多个候选客户 (needs_input)",
+					"when": "steps.lookup.count > 1",
+					"target": "ask_disambiguate"
+				},
+				{
+					"id": "single",
+					"label": "1 unique match",
+					"labelZh": "唯一匹配客户",
+					"when": "steps.lookup.count == 1",
+					"target": "crm_facts"
+				}
+			],
+			"defaultTarget": "product_cases"
+		},
+		{
+			"id": "ask_disambiguate",
+			"kind": "ask_user",
+			"label": "Ask User to Select Customer",
+			"labelZh": "多候选客户确认 (needs_input)",
+			"description": "Stop without guessing and ask the user to pick the exact company",
+			"descriptionZh": "发现多个合理候选，展示真实企业名称请用户选择，严禁模型自动猜测",
+			"promptTemplate": "Found multiple matching companies for \"{{vars.company}}\". Please select which one to prepare the visit brief for:\n{{steps.lookup.candidateNames}}",
+			"promptTemplateZh": "在 CRM 中检索到多个与“{{vars.company}}”匹配的候选企业，请确认本次拜访的具体对象：\n{{steps.lookup.candidateNames}}"
+		},
+		{
+			"id": "crm_facts",
+			"kind": "parallel",
+			"label": "Parallel CRM Facts",
+			"labelZh": "并行拉取 CRM 权威事实",
+			"description": "Fetch company profile, active deals, and recent activities concurrently via Promise.all",
+			"descriptionZh": "并发调用 get_company、list_deals、list_activities 一次性补齐客户、商机与互动事实",
+			"tools": ["get_company", "list_deals", "list_activities"],
+			"parallel": [
+				{
+					"id": "company_detail",
+					"label": "Company Profile",
+					"labelZh": "企业与联系人概况",
+					"tool": "get_company",
+					"args": { "companyId": "$steps.lookup.firstId" },
+					"storeAs": "company_detail"
+				},
+				{
+					"id": "deals",
+					"label": "Active Deals",
+					"labelZh": "关联商机列表",
+					"tool": "list_deals",
+					"args": { "companyId": "$steps.lookup.firstId" },
+					"storeAs": "deals"
+				},
+				{
+					"id": "activities",
+					"label": "Recent Activities",
+					"labelZh": "近期真实互动",
+					"tool": "list_activities",
+					"args": { "companyId": "$steps.lookup.firstId" },
+					"storeAs": "activities"
+				}
+			]
+		},
+		{
+			"id": "product_cases",
+			"kind": "parallel",
+			"label": "Parallel Product & Case Match",
+			"labelZh": "并行匹配我司产品与案例",
+			"description": "Concurrently search product docs, success cases, and optional quote catalog",
+			"descriptionZh": "并发检索产品文档、成功案例及报价目录（纯关系维护拜访自动标记 skipped）",
+			"tools": ["find_product_documents", "find_success_cases", "search_quote_catalog"],
+			"parallel": [
+				{
+					"id": "products",
+					"label": "Product Documents",
+					"labelZh": "产品资料检索",
+					"tool": "find_product_documents",
+					"args": { "query": "$vars.company" },
+					"when": "vars.relationshipOnly != true",
+					"storeAs": "products"
+				},
+				{
+					"id": "cases",
+					"label": "Success Cases",
+					"labelZh": "行业成功案例",
+					"tool": "find_success_cases",
+					"args": { "query": "$vars.company" },
+					"when": "vars.relationshipOnly != true",
+					"storeAs": "cases"
+				},
+				{
+					"id": "quotes",
+					"label": "Quote Catalog",
+					"labelZh": "标准报价目录",
+					"tool": "search_quote_catalog",
+					"args": { "query": "$vars.company" },
+					"when": "vars.includeQuote == true",
+					"storeAs": "quotes"
+				}
+			]
+		},
+		{
+			"id": "reply",
+			"kind": "llm_reply",
+			"label": "Synthesize Visit Briefing",
+			"labelZh": "合成结构化拜访简报",
+			"description": "1-turn LLM synthesis strictly separating CRM facts, product evidence, and unverified gaps",
+			"descriptionZh": "单次模型调用生成完整拜访简报：明确区分 CRM 事实、我司资料、待核实假设与信息缺口"
+		}
+	],
+	"edges": [
+		{ "id": "e_start_extract", "source": "start", "target": "extract_target" },
+		{ "id": "e_extract_lookup", "source": "extract_target", "target": "lookup_company" },
+		{ "id": "e_lookup_switch", "source": "lookup_company", "target": "check_candidates" },
+		{
+			"id": "e_switch_ask",
+			"source": "check_candidates",
+			"target": "ask_disambiguate",
+			"branch": "ask_disambiguate",
+			"label": "> 1 matches",
+			"labelZh": "多候选消歧"
+		},
+		{
+			"id": "e_switch_crm",
+			"source": "check_candidates",
+			"target": "crm_facts",
+			"branch": "crm_facts",
+			"label": "1 match",
+			"labelZh": "唯一匹配"
+		},
+		{
+			"id": "e_switch_notfound",
+			"source": "check_candidates",
+			"target": "product_cases",
+			"branch": "product_cases",
+			"label": "0 matches (skip CRM)",
+			"labelZh": "查无 (跳过 CRM)"
+		},
+		{ "id": "e_crm_products", "source": "crm_facts", "target": "product_cases" },
+		{ "id": "e_products_reply", "source": "product_cases", "target": "reply" }
+	]
+}

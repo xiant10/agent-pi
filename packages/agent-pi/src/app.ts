@@ -5,6 +5,7 @@ import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import {
+	AgentDoc,
 	createRegistry,
 	defineExtension,
 	Harness,
@@ -14,6 +15,7 @@ import {
 	type Storage,
 } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
+import { toLlmContent } from "@earendil-works/pi-mcp";
 import { coreExtension, instructionsExtension } from "./agent/core-extension.ts";
 import { createConfiguredModels } from "./agent/models.ts";
 import type { Profile } from "./agent/profiles.ts";
@@ -37,8 +39,18 @@ import { RunTracker } from "./runs.ts";
 import { AgentService } from "./service.ts";
 import { resolveInstance, SessionStore } from "./sessions.ts";
 import { discoverSkills, type Skill } from "./skills/skills.ts";
-import { type CatalogEntry, ToolCatalog } from "./tools/catalog.ts";
-import { mcpExtension, mcpExtensionName } from "./tools/mcp-extension.ts";
+import { type SkillsFor, TenantSkills, TurnPins } from "./skills/tenant.ts";
+import { type CatalogEntry, type CatalogView, ToolCatalog } from "./tools/catalog.ts";
+import {
+	isTenantExtension,
+	mcpExtension,
+	mcpExtensionName,
+	selectsTenant,
+	selectTenantExtension,
+	tenantExtension,
+	tenantExtensionName,
+} from "./tools/mcp-extension.ts";
+import { TenantConnectors } from "./tools/tenant.ts";
 import { capabilitiesOf, runtimeManifest } from "./runtime.ts";
 import { createHttpServer } from "./transport/http.ts";
 import { McpEndpoint } from "./transport/mcp.ts";
@@ -111,6 +123,15 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 	const credentials = new CredentialStore();
 	const mcpServers = [...config.mcpServers, ...plugins.mcpServers];
 	const grants = config.grants === undefined ? undefined : new GrantBroker(config.grants, options.grantOptions);
+	// Tenant skills are read from the control plane when a turn needs them; nothing is copied into this process.
+	const tenantSkills =
+		config.tenantSkills === undefined || grants === undefined
+			? undefined
+			: new TenantSkills(skills, { url: config.tenantSkills.url, token: () => grants.serviceToken(), log });
+	const skillsFor: SkillsFor = tenantSkills?.forTenant ?? (async () => skills);
+	container.value(Services.skillsFor, skillsFor);
+	const pins = new TurnPins(skillsFor, tenantSkills === undefined ? {} : { withDraft: tenantSkills.withDraft });
+	container.value(Services.sessionSkills, pins.of);
 	for (const server of mcpServers) {
 		if (server.transport === "http" && server.auth === "grant" && grants === undefined) {
 			throw new Error(`MCP server ${server.name} has auth: "grant", which needs a grants section`);
@@ -125,6 +146,24 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 		if (server.name === SUBAGENT_SERVER) throw new Error(`MCP server ${server.name}: that name is reserved for sub-agents`);
 	}
 	const mcp = new McpManager(mcpServers, { catalog, log, createTransport: await container.get(Services.mcpTransport) });
+	// Tenant connectors are read from the control plane like skills, and each tenant's tools are an extension of their
+	// own, which only that tenant's conversations select.
+	const registry = createRegistry();
+	const connectors =
+		config.tenantConnectors === undefined || config.tenantSkills === undefined || grants === undefined
+			? undefined
+			: new TenantConnectors(catalog, {
+					url: config.tenantSkills.url,
+					token: () => grants.serviceToken(),
+					log,
+					changed: (tenantId, tools) => {
+						if (tools.catalog.own().length === 0) registry.uninstall(defineExtension({ name: tenantExtensionName(tenantId) }));
+						else registry.install(tenantExtension(tenantId, tools, mcp, grants, config.tenantConnectors!.gatewayUrl));
+						log.info("connectors.tenant_changed", { tenant: tenantId, tools: tools.catalog.own().length });
+					},
+				});
+	if (connectors !== undefined) tenantSkills?.listeners.add((tenant) => connectors.changed(tenant));
+	const toolsFor = async (tenantId: string | undefined): Promise<CatalogView> => (connectors === undefined ? catalog : (await connectors.forTenant(tenantId)).catalog);
 
 	// Extension order is prompt order: configured instructions, plugin sections, then the skill index and profile.
 	let closing = false;
@@ -132,16 +171,17 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 	const identity = await container.get(Services.identity);
 	const subagents = buildSubagents(config, (await container.get(Services.models)).refs);
 	const runs = new RunTracker();
-	const registry = createRegistry();
 	registry.install(instructionsExtension(config.instructions));
 	for (const extension of plugins.extensions(profileOf, credentials)) registry.install(extension);
 	registry.install(
 		coreExtension({
 			skills,
+			sessionSkills: pins.of,
 			profiles,
 			defaultProfile,
 			profileOf,
 			catalog,
+			toolsFor,
 			subagents,
 			credentials,
 			slots: new ChildSlots(config.limits.maxSubagentsPerSession),
@@ -151,6 +191,44 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 			woken: (conversationId, session, submission, turnId) => service.woken(conversationId, session, submission, turnId),
 			stopping: () => closing || failed,
 			...(grants === undefined ? {} : { grants }),
+			callCatalogTool: async (api, toolContext, toolName, toolArgs) => {
+				const session = await readSession(api, api.conversationId, toolContext);
+				const view = await toolsFor(session?.tenantId);
+				const entry = view.get(toolName) ?? view.match([`*:${toolName}`, toolName]).map((n) => view.get(n)).find((e) => e !== undefined);
+				if (entry === undefined) {
+					return { output: `Tool ${toolName} not found`, isError: true };
+				}
+				if (!mcp.allowsTenant(entry, session?.tenantId)) {
+					return { output: "This tool isn't available to this tenant.", isError: true };
+				}
+				const caller =
+					grants === undefined
+						? undefined
+						: {
+								key: async () => (await grants.grantOf(api.conversationId))?.grantId,
+								token: () => grants.token(api.conversationId),
+						  };
+				try {
+					const tenantTools = connectors?.known(session?.tenantId);
+					const connectorId = catalog.get(entry.name) === undefined ? tenantTools?.connectors.get(entry.server) : undefined;
+					const result =
+						connectorId === undefined
+							? await mcp.callTool(entry, toolArgs, caller, toolContext.abortSignal)
+							: await mcp.callConnector(
+									`${config.tenantConnectors!.gatewayUrl.replace(/\/+$/, "")}/mcp/connector/${encodeURIComponent(connectorId)}`,
+									connectorId,
+									entry,
+									toolArgs,
+									caller,
+									toolContext.abortSignal,
+								);
+					const blocks = toLlmContent(result);
+					const text = blocks.map((b) => ("text" in b ? b.text : "")).join("\n");
+					return { output: text, isError: result.isError === true };
+				} catch (error) {
+					return { output: error instanceof Error ? error.message : String(error), isError: true };
+				}
+			},
 		}),
 	);
 	registry.install(identityExtension(identity, config.agent, (id) => store.publicId(id), credentials));
@@ -172,6 +250,10 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 
 	const storage = await container.get(Services.storage);
 	const settings: HarnessSettings = {
+		// Every extension but tenants' own: a conversation adds its tenant's at its turn.
+		get extensions() {
+			return registry.snapshot().installed().filter((extension) => !isTenantExtension(extension.name));
+		},
 		stream: config.durable.stream,
 		retry: config.durable.retry,
 		compaction: config.durable.compaction,
@@ -232,7 +314,16 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 		harness,
 		store,
 		catalog,
+		toolsFor,
+		selectTenantTools: async (conversation, tenantId, selectContext) => {
+			if (connectors === undefined || tenantId === undefined || tenantId === "") return;
+			if (selectsTenant(await harness.snapshot(AgentDoc, conversation.id, selectContext), tenantId)) return;
+			await conversation.commit((tx) => selectTenantExtension(tx, conversation.id, tenantId), selectContext);
+		},
 		skills,
+		skillsFor,
+		pins,
+		toolAllowed: (entry, tenantId) => mcp.allowsTenant(entry, tenantId),
 		profiles,
 		defaultProfile,
 		credentials,
@@ -294,6 +385,9 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 		plugins: plugins.plugins.map((plugin) => plugin.name),
 	});
 
+	// Started last, so a failed start leaves nothing running.
+	const watching = new AbortController();
+	void tenantSkills?.watch(watching.signal);
 	return {
 		agent: config.agent,
 		port,
@@ -307,6 +401,7 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 		close: async () => {
 			if (closing) return;
 			closing = true;
+			watching.abort();
 			clearInterval(credentialSweep);
 			const stopped = new Promise<void>((resolve) => server.close(() => resolve()));
 			// Ending streams lets clients reconnect elsewhere at once instead of waiting for a timeout.

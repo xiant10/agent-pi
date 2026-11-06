@@ -30,7 +30,43 @@ export { MessageEntry, RecordEntry } from "./plugins/history.ts";
 export type { Profile } from "./agent/profiles.ts";
 export { createConfiguredModels, type ModelConfig } from "./agent/models.ts";
 export { type CallContext, type CallIdentity, type IdentityHeaderResolver, GATEWAY_IDENTITY_HEADERS, type IdentityHeaderNames, IdentityRegistry } from "./identity.ts";
-export { type Skill, discoverSkills, parseSkill } from "./skills/skills.ts";
+export { type Skill, type TenantSkillSource, discoverSkills, parseSkill, readSkillFile } from "./skills/skills.ts";
+export {
+	applyTenantSkills,
+	customSkill,
+	type DraftSkills,
+	overrideFlow,
+	type SessionSkills,
+	type SkillsFor,
+	type TenantSkillContent,
+	type TenantSkillRecord,
+	TenantSkills,
+	type TenantSkillsOptions,
+	TurnPins,
+} from "./skills/tenant.ts";
+export {
+	FlowDoc,
+	type FlowBranchRule,
+	type FlowEdge,
+	type FlowNode,
+	type FlowNodeKind,
+	type FlowParallelCall,
+	type FlowRunTrace,
+	type FlowStepStatus,
+	type FlowStepTrace,
+	type SkillFlow,
+} from "./flow/types.ts";
+export {
+	cleanQueryInput,
+	evaluateCondition,
+	executeDeterministicFlow,
+	type FlowExecuteOptions,
+	type FlowExecutionResult,
+	synthesizeSkillFlow,
+	type ToolCallOutcome,
+	validateSkillFlow,
+} from "./flow/engine.ts";
+export { type FlowRunnerOptions, flowRunner } from "./flow/plugin.ts";
 export type { CatalogEntry, ToolCatalog } from "./tools/catalog.ts";
 export type { ClientEventBody } from "./events/mapper.ts";
 export type { McpServerConfig } from "./mcp/manager.ts";

@@ -94,6 +94,16 @@ export type AppConfig = {
 	/** Run before the plugins passed in code, in this order. */
 	readonly plugins: readonly PluginRef[];
 	readonly skillsDir?: string;
+	/**
+	 * Read each tenant's published skills from `t10-agent-control` at this URL, as this runtime's service account
+	 * (`grants`). Off when unset: every tenant sees the built-in skills.
+	 */
+	readonly tenantSkills?: { readonly url: string };
+	/**
+	 * Offer each tenant's published connectors, read from `tenantSkills.url`, and call them through the tool gateway at
+	 * `gatewayUrl` (`/mcp/connector/<id>`). Off when unset.
+	 */
+	readonly tenantConnectors?: { readonly gatewayUrl: string };
 	readonly mcpServers: readonly McpServerConfig[];
 	readonly limits: LimitsConfig;
 	/** Offer this agent over MCP; off when unset. */
@@ -374,6 +384,15 @@ export function loadConfig(path: string): AppConfig {
 	const compaction = r.optionalObject(durable.compaction, "durable.compaction");
 	const retry = r.optionalObject(durable.retry, "durable.retry");
 	const skillsDir = r.optionalString(raw.skillsDir, "skillsDir");
+	const tenantSkillsRaw = r.optionalObject(raw.tenantSkills, "tenantSkills");
+	// An empty url turns it off, as for grants, so one config file serves both from the environment.
+	const tenantSkillsUrl = r.optionalString(tenantSkillsRaw.url, "tenantSkills.url");
+	if (tenantSkillsUrl !== undefined && tenantSkillsUrl !== "" && grants === undefined) r.fail("tenantSkills", "needs a grants section, for the runtime's service account");
+	const tenantConnectorsRaw = r.optionalObject(raw.tenantConnectors, "tenantConnectors");
+	const gatewayUrl = r.optionalString(tenantConnectorsRaw.gatewayUrl, "tenantConnectors.gatewayUrl");
+	if (gatewayUrl !== undefined && gatewayUrl !== "" && (tenantSkillsUrl === undefined || tenantSkillsUrl === "")) {
+		r.fail("tenantConnectors", "needs tenantSkills.url, where connectors are published");
+	}
 	const instanceId = r.optionalString(raw.instanceId, "instanceId");
 	if (instanceId !== undefined && !/^[A-Za-z0-9_-]+$/.test(instanceId)) r.fail("instanceId", "must match [A-Za-z0-9_-]+");
 	const timeoutMs = r.optionalNumber(stream.timeoutMs, "durable.stream.timeoutMs");
@@ -407,6 +426,8 @@ export function loadConfig(path: string): AppConfig {
 		instructions,
 		plugins,
 		...(skillsDir === undefined ? {} : { skillsDir: file(skillsDir) }),
+		...(tenantSkillsUrl === undefined || tenantSkillsUrl === "" ? {} : { tenantSkills: { url: tenantSkillsUrl } }),
+		...(gatewayUrl === undefined || gatewayUrl === "" ? {} : { tenantConnectors: { gatewayUrl } }),
 		mcpServers,
 		limits: {
 			maxSessionsPerUser: r.number(limits.maxSessionsPerUser, "limits.maxSessionsPerUser", 20),

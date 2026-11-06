@@ -274,6 +274,11 @@ export class GrantBroker {
 		return check;
 	}
 
+	/** This runtime's own token, for services it reads as itself, such as tenant skills from the control plane. */
+	serviceToken(): Promise<string> {
+		return this.#serviceToken();
+	}
+
 	#serviceToken(): Promise<string> {
 		if (this.#service !== undefined && this.#service.expiresAt - this.#now() > RENEW_BEFORE_MS) {
 			return Promise.resolve(this.#service.token);

@@ -51,7 +51,7 @@
 			"model": "smart",
 			"thinkingLevel": "${CHAT_THINKING:-off}",
 			"maxActiveTools": 40,
-			"alwaysOnTools": ["collab:work_list"],
+			"alwaysOnTools": ["collab:work_list", "knowledge:knowledge_sets"],
 			"preload": { "maxTools": 4, "minScore": 4 }
 		},
 		"voice": {
@@ -66,6 +66,8 @@
 	},
 	"instructions": [{ "name": "base", "file": "../prompts/base.md", "tag": false }],
 	"skillsDir": "../skills",
+	"tenantSkills": { "url": "${AGENT_CONTROL_URL:-}" },
+	"tenantConnectors": { "gatewayUrl": "${TOOL_GATEWAY_URL:-}" },
 	"plugins": [
 		{ "use": "guardrails" },
 		{ "use": "shortcuts", "options": { "faqFile": "../content/faq.json", "assistantName": "Ava" } },
@@ -80,7 +82,8 @@
 		"audiences": "${GRANT_AUDIENCES:-agent-pi}"
 	},
 	"mcpServers": [
-		{ "name": "collab", "transport": "http", "url": "${COLLAB_MCP_URL:-}", "auth": "grant", "prefix": "", "agentContext": true }
+		{ "name": "collab", "transport": "http", "url": "${COLLAB_MCP_URL:-}", "auth": "grant", "prefix": "", "agentContext": true },
+		{ "name": "knowledge", "transport": "http", "url": "${KNOWLEDGE_MCP_URL:-}", "auth": "grant", "prefix": "", "agentContext": true }
 	],
 	"limits": {
 		"maxSessionsPerUser": "${MAX_SESSIONS_PER_USER:-1000}",

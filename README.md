@@ -141,7 +141,10 @@ The session is named by the `Agent-Session-Id` header or `params.sessionId`.
 | `session.cancel` | `tasks?` (also end background tasks) | `{ aborted: true }` |
 | `session.retry` | | `{ retried }`: runs tasks parked after repeated crashes again |
 | `session.close` | | `{ closed: true }` |
-| `skills.list` | | `{ skills }` |
+| `skills.list` | | `{ skills }`: the caller's tenant's view, with `flow` and, for a tenant's version, `source` |
+| `skills.checkFlow` | `skill`, `flow`, `tools?` | `{ flow, tools }`: checks a tenant's workflow as the harness will read it, and saves nothing |
+| `skills.get` | `skill` | `{ skill }`: one skill as the caller's tenant sees it, with `body`, `keywords` and its file names |
+| `skills.tools` | | `{ tools: [{ name, server, tool, description }] }`: the catalog the caller's tenant can use, for picking a skill's tools |
 | *plugin methods* | as the plugin defines | as the plugin returns |
 
 `input` is a string or pi-ai content blocks (`{type:"text",text}`, `{type:"image",data,mimeType}`). `requestId` makes a retried prompt idempotent.
@@ -252,6 +255,8 @@ Instructions...
 ```
 
 The prompt lists only names and descriptions. `load_skill` returns the instructions and activates the tools matching `tools` (`[server:]glob`); tools that match a loaded skill later (a server that connects late or re-lists) are activated at the session's next input. `keywords` let preloading activate those tools before the model's first response.
+
+With `tenantSkills.url` (`AGENT_CONTROL_URL` in the bundled apps) and `grants`, each tenant also sees its published overrides of these skills' workflows and skills of its own, read from `t10-agent-control` as this runtime's service account when a turn needs them and kept 10 seconds, or until its change feed names the tenant. A session created with `metadata.skillDraft` is a skill editor's test: its turns use the owner's draft of that skill. Each turn pins the skills it started with, and a custom skill's reference files are read from memory with `load_skill` and `file`. The skill index, `load_skill`, preloading, the flow runner and `skills.list` all use the session's tenant's view. Nothing is written to disk. See `t10-agent-control/docs/tenant-skills.md`.
 
 ## Extending auth
 

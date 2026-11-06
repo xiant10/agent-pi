@@ -4,6 +4,7 @@ import { AgentDoc, type Conversation, type ConversationId, type Harness, type Js
 import { InstanceDoc, SessionDoc, type SessionState, ToolStateDoc, UserSessionsDoc } from "./agent/docs.ts";
 import type { Profile } from "./agent/profiles.ts";
 import { TasksDoc } from "./agent/tasks.ts";
+import { FlowDoc } from "./flow/types.ts";
 import { ownerKey, type Principal } from "./auth/authenticator.ts";
 import type { StoredGrant } from "./auth/grants.ts";
 import { AppError, RPC, rateLimited, sessionNotFound } from "./errors.ts";
@@ -167,6 +168,7 @@ export class SessionStore {
 						await tx.doc(ProviderDoc, id);
 						// Warmed now so prompts and event hubs read them from memory without negative lookups or setup commits.
 						await tx.doc(TasksDoc, id);
+						await tx.doc(FlowDoc, id);
 						await tx.doc(TurnsDoc, id);
 					},
 				},

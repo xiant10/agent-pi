@@ -1,0 +1,108 @@
+{
+	"id": "weather",
+	"title": "Weather Forecast Workflow",
+	"titleZh": "天气查询与预报工作流",
+	"mode": "deterministic",
+	"triggerKeywords": ["weather", "forecast", "rain", "temperature", "天气"],
+	"nodes": [
+		{
+			"id": "start",
+			"kind": "start",
+			"label": "User Weather Request",
+			"labelZh": "用户天气请求",
+			"description": "Receive weather or forecast inquiry",
+			"descriptionZh": "接收地点与日期的天气查询请求"
+		},
+		{
+			"id": "extract_place",
+			"kind": "extract",
+			"label": "Extract Place & Time",
+			"labelZh": "提取城市与时间参数",
+			"description": "Parse target city/location and forecast horizon without LLM call",
+			"descriptionZh": "零模型延迟提取目标地点与查询时间段",
+			"extract": {
+				"place": { "fallbackInput": true },
+				"ambiguous": {
+					"keywords": {
+						"springfield": true,
+						"portland": true
+					},
+					"default": false
+				}
+			}
+		},
+		{
+			"id": "check_place",
+			"kind": "switch",
+			"label": "Location Disambiguation",
+			"labelZh": "同名地点消歧判断",
+			"description": "Branch if location name is ambiguous",
+			"descriptionZh": "判断地点是否唯一或需要用户确认",
+			"branches": [
+				{
+					"id": "ambiguous",
+					"label": "Ambiguous place",
+					"labelZh": "存在同名地点",
+					"when": "vars.ambiguous == true",
+					"target": "ask_place"
+				}
+			],
+			"defaultTarget": "fetch_forecast"
+		},
+		{
+			"id": "ask_place",
+			"kind": "ask_user",
+			"label": "Ask User to Clarify",
+			"labelZh": "请求用户明确地点",
+			"description": "Pause flow and ask which city/state the user means",
+			"descriptionZh": "暂停工作流，请用户确认具体省/州及城市",
+			"promptTemplate": "Which {{vars.place}} do you mean? Please specify the state or country so I can fetch the right forecast.",
+			"promptTemplateZh": "请问您指的是哪个“{{vars.place}}”？请补充所在省份或国家以便查询准确天气。"
+		},
+		{
+			"id": "fetch_forecast",
+			"kind": "tool",
+			"label": "Call Forecast Tool",
+			"labelZh": "调用气象预报工具",
+			"description": "Fetch current weather and forecast from MCP weather provider",
+			"descriptionZh": "直接调用天气 MCP 工具获取温度、降水与风力数据",
+			"tools": ["weather:get_forecast"],
+			"call": {
+				"tool": "get_forecast",
+				"args": {
+					"place": "$vars.place"
+				},
+				"storeAs": "forecast"
+			}
+		},
+		{
+			"id": "reply",
+			"kind": "llm_reply",
+			"label": "Format Weather Brief",
+			"labelZh": "生成天气简报回复",
+			"description": "Answer with condition and temperature first, then rain/wind if relevant",
+			"descriptionZh": "优先呈现天气状况与温度，按需提示降雨或大风"
+		}
+	],
+	"edges": [
+		{ "id": "e1", "source": "start", "target": "extract_place" },
+		{ "id": "e2", "source": "extract_place", "target": "check_place" },
+		{
+			"id": "e3_ambiguous",
+			"source": "check_place",
+			"target": "ask_place",
+			"branch": "ask_place",
+			"label": "Ambiguous",
+			"labelZh": "多候选需确认"
+		},
+		{
+			"id": "e3_resolved",
+			"source": "check_place",
+			"target": "fetch_forecast",
+			"branch": "fetch_forecast",
+			"label": "Unique place",
+			"labelZh": "地点唯一"
+		},
+		{ "id": "e4", "source": "fetch_forecast", "target": "reply" }
+	]
+}

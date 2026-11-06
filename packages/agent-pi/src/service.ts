@@ -21,6 +21,8 @@ import {
 import { assistantText } from "./agent/subagents.ts";
 import { SessionDoc, type SessionState, ToolStateDoc } from "./agent/docs.ts";
 import { TasksDoc, taskUsage, tokensSpent } from "./agent/tasks.ts";
+import { FlowDoc, type FlowRunTrace, type SkillFlow } from "./flow/types.ts";
+import { validateSkillFlow } from "./flow/engine.ts";
 import { pinnedTools, preloadTools, type Profile } from "./agent/profiles.ts";
 import { parkedTasks } from "./agent/parked.ts";
 import { ownerKey, type Principal } from "./auth/authenticator.ts";
@@ -37,10 +39,11 @@ import { type PluginRunner, textOf } from "./plugins/runner.ts";
 import type { AgentPlugin, SessionContext } from "./plugins/types.ts";
 import type { RunTracker } from "./runs.ts";
 import type { SessionChanges, SessionInfo, SessionPage, SessionStore } from "./sessions.ts";
-import type { Skill } from "./skills/skills.ts";
+import { type Skill, skillFiles } from "./skills/skills.ts";
+import { customSkill, overrideFlow, type SkillsFor, type TenantSkillContent, type TurnPins } from "./skills/tenant.ts";
 import { activateTools, refreshSkills } from "./tools/activation.ts";
 import { type TranscriptMessage, transcriptOf, withNote } from "./transcript.ts";
-import type { ToolCatalog } from "./tools/catalog.ts";
+import type { CatalogEntry, CatalogView, ToolCatalog } from "./tools/catalog.ts";
 import type { Logger } from "./util/log.ts";
 import { startSpan, traceIdOf, type TraceSpan } from "./util/tracing.ts";
 
@@ -49,7 +52,19 @@ export type ServiceDeps = {
 	readonly harness: Harness;
 	readonly store: SessionStore;
 	readonly catalog: ToolCatalog;
+	/** The catalog plus a tenant's own connector tools. Default: the catalog. */
+	readonly toolsFor?: (tenantId: string | undefined) => Promise<CatalogView>;
+	/**
+	 * Make a tenant's connector tools selectable by this conversation, before its turn. A conversation selects only its
+	 * own tenant's.
+	 */
+	readonly selectTenantTools?: (conversation: Conversation, tenantId: string | undefined, context: Context) => Promise<void>;
 	readonly skills: readonly Skill[];
+	readonly skillsFor: SkillsFor;
+	/** Pins each turn's skills when it's admitted. */
+	readonly pins: TurnPins;
+	/** Whether a tenant may use a catalog tool; tools of servers kept to some tenants aren't everyone's. Default: yes. */
+	readonly toolAllowed?: (entry: CatalogEntry, tenantId: string | undefined) => boolean;
 	readonly profiles: ReadonlyMap<string, Profile>;
 	readonly defaultProfile: Profile;
 	readonly credentials: CredentialStore;
@@ -125,6 +140,8 @@ export type SessionDetails = SessionInfo & {
 	readonly subagents: readonly string[];
 	/** This session's background tasks. */
 	readonly tasks: readonly SessionTask[];
+	/** Latest deterministic or guided skill flow execution trace for this session. */
+	readonly flow?: FlowRunTrace;
 	/** What background tasks spent. It is not in `usage`, unlike a foreground child's: add the two for the session's total. */
 	readonly taskUsage: Usage;
 };
@@ -154,6 +171,42 @@ export class AgentService {
 
 	get skills(): readonly Skill[] {
 		return this.#deps.skills;
+	}
+
+	/** The skills the caller's tenant sees: built-in ones with its published overrides, and its own. */
+	skillsFor(principal: Principal): Promise<readonly Skill[]> {
+		return this.#deps.skillsFor(principal.tenantId);
+	}
+
+	/** One skill as the caller's tenant sees it, with its instructions and the names of its files, for an editor. */
+	async skill(principal: Principal, name: string): Promise<Skill & { readonly fileNames: readonly string[] }> {
+		const skill = (await this.skillsFor(principal)).find((candidate) => candidate.name === name);
+		if (skill === undefined) throw new AppError("not_found", 404, RPC.notFound, `no skill named ${JSON.stringify(name)}`);
+		return { ...skill, fileNames: skillFiles(skill) };
+	}
+
+	/** The tools the caller's tenant can use on this agent, for picking a skill's tools. Names and descriptions only. */
+	async tools(principal: Principal): Promise<readonly CatalogEntry[]> {
+		const allowed = this.#deps.toolAllowed ?? (() => true);
+		const view = (await this.#deps.toolsFor?.(principal.tenantId)) ?? this.#deps.catalog;
+		return view.entries().filter((entry) => allowed(entry, principal.tenantId));
+	}
+
+	/**
+	 * Check a workflow as the harness will when the tenant's published version is read, and save nothing: tenant skills
+	 * are published at `t10-agent-control`. A built-in skill's name checks an override; any other a custom skill.
+	 */
+	checkFlow(name: string, flow: SkillFlow, custom: TenantSkillContent = {}): { readonly flow: SkillFlow; readonly tools: readonly string[] } {
+		try {
+			const builtin = this.#deps.skills.find((skill) => skill.name === name);
+			const checked =
+				builtin === undefined
+					? customSkill(name, { description: name, ...custom, flow }).flow!
+					: overrideFlow(builtin, flow);
+			return { flow: checked, tools: validateSkillFlow(checked).tools };
+		} catch (error) {
+			throw invalidParams(error instanceof Error ? error.message : String(error));
+		}
 	}
 
 	async createSession(
@@ -284,11 +337,12 @@ export class AgentService {
 	async getSession(principal: Principal, sessionId: string, context: Context): Promise<SessionDetails> {
 		const { store } = this.#deps;
 		const { conversation, session } = await store.readable(principal, sessionId, context);
-		const [agent, live, usage, tasks] = await Promise.all([
+		const [agent, live, usage, tasks, flowDoc] = await Promise.all([
 			this.#deps.harness.snapshot(AgentDoc, conversation.id, context),
 			this.#deps.harness.snapshot(LiveDoc, conversation.id, context),
 			this.#deps.harness.snapshot(UsageDoc, conversation.id, context),
 			this.#deps.harness.snapshot(TasksDoc, conversation.id, context),
+			this.#deps.harness.snapshot(FlowDoc, conversation.id, context),
 		]);
 		const spent = await taskUsage(this.#deps.harness, tasks ?? { tasks: [] }, context);
 		return {
@@ -308,6 +362,7 @@ export class AgentService {
 				activeAt: task.activeAt,
 				...(spent.byTask.has(task.id) ? { usage: spent.byTask.get(task.id)! } : {}),
 			})),
+			...(flowDoc?.latest === undefined ? {} : { flow: flowDoc.latest }),
 			taskUsage: spent.total,
 		};
 	}
@@ -446,6 +501,17 @@ export class AgentService {
 		context: Context,
 	): Promise<Admitted> {
 		const { requestId } = options;
+		// This turn's skills, before plugins run: the flow runner, the index and load_skill all read this pin.
+		// A skill editor's test conversation names the skill whose draft it tries; the author is always its owner.
+		const skillDraft = session.metadata?.skillDraft;
+		const skills = await this.#deps.pins.start(
+			conversation.id,
+			session.tenantId,
+			typeof skillDraft === "string" && skillDraft !== "" ? { author: session.userId, name: skillDraft } : undefined,
+		);
+		// The tenant's connector tools, which this turn's search, skills and preloading see.
+		const tools = (await this.#deps.toolsFor?.(session.tenantId)) ?? this.#deps.catalog;
+		await this.#deps.selectTenantTools?.(conversation, session.tenantId, context);
 		// A turn starts when the call arrives, whether or not the client named it.
 		const turnId = options.turnId ?? randomUUID();
 		// A retry of an input that was already admitted gets the first outcome; plugins and preloading do not run again.
@@ -473,18 +539,22 @@ export class AgentService {
 			return { kind: "reply", conversationId: conversation.id, profile, turnId: reply.turnId, text: reply.text, plugin: reply.plugin, placement: reply.placement };
 		}
 		const { input: submitted, note } = outcome;
+		const skillTools = (name: string): string[] | undefined => {
+			const skill = skills.find((candidate) => candidate.name === name);
+			return skill === undefined ? undefined : tools.match(skill.tools);
+		};
 
 		// Loaded skills pick up tools listed since they loaded; then the input's likely tools are preloaded, after the
 		// tools plugins routed this input to. A retry skips this: its input is already in the transcript.
-		const routed = this.#deps.catalog.match(outcome.activate);
+		const routed = tools.match(outcome.activate);
 		const preload =
 			earlier === undefined
-				? [...new Set([...routed, ...preloadTools(textOf(submitted), profile, this.#deps.catalog, this.#deps.skills)])]
+				? [...new Set([...routed, ...preloadTools(textOf(submitted), profile, tools, skills)])]
 				: [];
 		const state = await this.#deps.harness.snapshot(ToolStateDoc, conversation.id, context);
 		const hasSkills =
 			earlier === undefined &&
-			Object.entries(state?.skills ?? {}).some(([skill, known]) => (this.#skillTools(skill) ?? []).some((name) => !known.includes(name)));
+			Object.entries(state?.skills ?? {}).some(([skill, known]) => (skillTools(skill) ?? []).some((name) => !known.includes(name)));
 		const pinned = pinnedTools(profile, this.#deps.catalog);
 		let needsPreload = preload.length > 0;
 		if (needsPreload && !hasSkills) {
@@ -506,7 +576,7 @@ export class AgentService {
 		if (needsPreload || hasSkills) {
 			const policy = { pinned, maxActive: profile.maxActiveTools };
 			const { refreshed, preloaded } = await conversation.commit(async (tx) => {
-				const refreshed = hasSkills ? (await refreshSkills(tx, conversation.id, this.#skillTools, policy)).added : [];
+				const refreshed = hasSkills ? (await refreshSkills(tx, conversation.id, skillTools, policy)).added : [];
 				const preloaded = needsPreload ? (await activateTools(tx, conversation.id, preload, policy)).added : [];
 				return { refreshed, preloaded };
 			}, context);
@@ -662,9 +732,14 @@ export class AgentService {
 		const active = await this.#deps.hubs.existing(conversation.id);
 		if (active !== undefined) return active;
 		// A hub can only watch a document that exists, and this one may not until the first task.
-		if (!child && (await this.#deps.harness.snapshot(TasksDoc, conversation.id, context)) === undefined) {
+		if (
+			!child &&
+			((await this.#deps.harness.snapshot(TasksDoc, conversation.id, context)) === undefined ||
+				(await this.#deps.harness.snapshot(FlowDoc, conversation.id, context)) === undefined)
+		) {
 			await conversation.commit(async (tx) => {
 				await tx.doc(TasksDoc, conversation.id);
+				await tx.doc(FlowDoc, conversation.id);
 			}, context);
 		}
 		const profile = this.#profile(session.profile);
@@ -747,12 +822,6 @@ export class AgentService {
 			})
 			.catch((error: unknown) => this.#deps.log.warn("plugin.after_run_failed", { error: String(error) }));
 	}
-
-	/** A skill's tools in the current catalog; `undefined` for a skill that no longer exists. */
-	readonly #skillTools = (name: string): string[] | undefined => {
-		const skill = this.#deps.skills.find((candidate) => candidate.name === name);
-		return skill === undefined ? undefined : this.#deps.catalog.match(skill.tools);
-	};
 
 	#profile(name: string | undefined): Profile {
 		if (name === undefined) return this.#deps.defaultProfile;

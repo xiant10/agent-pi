@@ -177,7 +177,8 @@ Methods:
 | `session.cancel` | `{ tasks? }` | `{ aborted: true }` |
 | `session.retry` | `{}` | `{ retried }` |
 | `session.close` | `{}` | `{ closed: true }` |
-| `skills.list` | `{}` | `{ skills: [{ name, description }] }` |
+| `skills.list` | `{}` | `{ skills: [{ name, description, tools, flow?, source? }] }`, as the caller's tenant sees them |
+| `skills.checkFlow` | `{ skill, flow, tools? }` | `{ flow, tools }`; saves nothing |
 
 `note` is for the model on that turn and stays out of `session.messages`. A voice client on a chat session uses it to say the reply is spoken, and what was heard of a reply that was cut off.
 
@@ -278,6 +279,18 @@ Mapping onto pi-durable 1.4.0: every MCP server is one extension (`mcp.<server>`
 refresh re-installs that extension in place. The meta-tools live in the `agent.core` extension. A conversation's
 `pi.agent.tools` is a name array, the exact set offered. Activation edits that array and an `app.tools` document
 (activation order, for eviction) in one commit from the tool's `api.commit()`.
+
+**Tenant connectors.** Built today: with `tenantConnectors.gatewayUrl` (`TOOL_GATEWAY_URL`) and `tenantSkills.url`,
+`TenantConnectors` (`src/tools/tenant.ts`) reads a tenant's published schemas from `GET /v1/runtime/connectors` and
+calls `<gatewayUrl>/mcp/connector/<id>`. Proposed, replacing it: the gateway serves a tenant's connectors as one MCP
+server, `/mcp/tenant`, and the assistant configures it as an `auth: "grant"` server with `perTenant: true`. Such a
+server isn't listed at startup; it's listed at the start of a turn with the turn's grant token, kept per tenant for 10
+seconds (5 minutes' fallback, ended early by the skills change feed), and its tools stay in the `tenant.<tenant>`
+extension and a `ScopedCatalog`, so two tenants' `crm_get_account` never meet. Each tool's `_meta["t10/server"]` is
+its server name for skill patterns and search. Calls go over the run's grant connection like any grant server, and
+agent-pi holds no connector IDs. `skills.tools` then returns the shared catalog only; workbench adds connector tools
+from control. See [`t10-agent-control/docs/tenant-connectors.md`](../../t10-agent-control/docs/tenant-connectors.md),
+"Control, gateway and harness".
 
 ## R7: speed and reasoning
 

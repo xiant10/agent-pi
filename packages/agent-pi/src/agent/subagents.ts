@@ -20,6 +20,7 @@ import {
 import type { CredentialStore } from "../auth/credentials.ts";
 import type { GrantBroker } from "../auth/grants.ts";
 import type { ToolCatalog } from "../tools/catalog.ts";
+import { selectTenantExtension } from "../tools/mcp-extension.ts";
 import { readSession, SessionDoc, type SessionState } from "./docs.ts";
 import { META_TOOLS } from "./profiles.ts";
 
@@ -177,6 +178,8 @@ export async function createChild(
 	});
 	const agent = await tx.doc(AgentDoc, created.id);
 	agent.tools = spec.tools(Array.isArray(agent.tools) ? agent.tools : []);
+	// A child works for its parent's tenant, so it may select that tenant's connector tools.
+	if (parent.tenantId !== undefined && parent.tenantId !== "") await selectTenantExtension(tx, created.id, parent.tenantId);
 	Object.assign(await tx.doc(SessionDoc, created.id), childSession(parent, parentId), session);
 	await tx.doc(ProviderDoc, created.id);
 	const listed = await tx.doc(SessionDoc, parentId);

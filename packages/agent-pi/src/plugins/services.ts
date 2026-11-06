@@ -6,6 +6,7 @@ import type { Authenticator } from "../auth/authenticator.ts";
 import type { AppConfig } from "../config.ts";
 import type { McpServerConfig } from "../mcp/manager.ts";
 import type { Skill } from "../skills/skills.ts";
+import type { SessionSkills, SkillsFor } from "../skills/tenant.ts";
 import type { ToolCatalog } from "../tools/catalog.ts";
 import type { IdentityHeaderResolver, IdentityRegistry } from "../identity.ts";
 import type { Logger } from "../util/log.ts";
@@ -35,6 +36,10 @@ export const Services = {
 	profiles: token<ReadonlyMap<string, Profile>>("profiles"),
 	/** Default: discovered in `config.skillsDir`. Plugins' `skills` are added to these. */
 	skills: token<readonly Skill[]>("skills"),
+	/** The skills one tenant sees: `skills` with its published overrides and own skills. Bound once skills are known. */
+	skillsFor: token<SkillsFor>("skillsFor"),
+	/** The skills a session's current turn started with; what prompts, `load_skill` and flows use. */
+	sessionSkills: token<SessionSkills>("sessionSkills"),
 	/** Default: from `config.storage`. */
 	storage: token<Storage>("storage"),
 	/** Default: from `config.auth`. Plugins' `authenticate` hooks run after it. */

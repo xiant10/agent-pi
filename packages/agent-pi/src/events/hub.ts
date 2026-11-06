@@ -3,6 +3,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { type AgentEvent, type AgentEventStream, type ConversationId, type Harness, watchEvents } from "@earendil-works/pi-durable";
 import { ProgressController, type ProgressEvent } from "./progress.ts";
 import { TasksDoc } from "../agent/tasks.ts";
+import { FlowDoc, type FlowRunTrace } from "../flow/types.ts";
 import type { Logger } from "../util/log.ts";
 import { type ClientEventBody, EventMapper, type MapperOptions, type TaskStatus } from "./mapper.ts";
 
@@ -66,10 +67,12 @@ export class SessionHub {
 	#inbox: { id: number; mode: string }[];
 	/** Durable's snapshots do not cover tasks, so the hub keeps them for its own. */
 	readonly #tasks = new Map<string, TaskStatus>();
+	#latestFlow: FlowRunTrace | undefined;
 	#idleTimer: ReturnType<typeof setTimeout> | undefined;
 	#detachedSince: number | undefined;
 	#stopped = false;
 	#stopTasks: (() => Promise<unknown> | undefined) | undefined;
+	#stopFlow: (() => Promise<unknown> | undefined) | undefined;
 
 	private constructor(
 		conversationId: ConversationId,
@@ -110,7 +113,7 @@ export class SessionHub {
 		const emit = (body: ClientEventBody) => {
 			observe?.(body);
 			// Snapshots carry the hub's own state; they are not for plugins to change.
-			if (body.type === "snapshot") hub.#publish({ ...body, tasks: [...hub.#tasks.values()], ...(hub.#latestProgress === undefined ? {} : { progress: hub.#latestProgress }) });
+			if (body.type === "snapshot") hub.#publish({ ...body, tasks: [...hub.#tasks.values()], ...(hub.#latestFlow === undefined ? {} : { flow: hub.#latestFlow }), ...(hub.#latestProgress === undefined ? {} : { progress: hub.#latestProgress }) });
 			else if (transform === undefined) hub.#publish(body);
 			else for (const mapped of transform(body)) hub.#publish(mapped);
 		};
@@ -145,6 +148,14 @@ export class SessionHub {
 				hub.#tasks.set(id, { taskId: id, name, status });
 				emit({ type: "task.updated", taskId: id, name, status });
 			}
+		});
+		const flow = await harness.watchDoc(FlowDoc, conversationId, BACKGROUND_CONTEXT);
+		hub.#stopFlow = () => flow?.stop();
+		hub.#latestFlow = flow?.value?.latest;
+		flow?.start(async (state) => {
+			if (state?.latest === undefined) return;
+			hub.#latestFlow = state.latest;
+			emit({ type: "flow.updated", trace: state.latest });
 		});
 		void stream.closed.then(() => hub.stop()).catch((error: unknown) => {
 			log.warn("hub.stream_failed", { conversationId, error: error instanceof Error ? error.message : String(error) });
@@ -193,6 +204,7 @@ export class SessionHub {
 		for (const subscriber of [...this.#subscribers]) subscriber.end();
 		this.#subscribers.clear();
 		await this.#stopTasks?.()?.catch(() => undefined);
+		await this.#stopFlow?.()?.catch(() => undefined);
 		await this.#stream.stop().catch(() => undefined);
 	}
 
@@ -243,6 +255,7 @@ export class SessionHub {
 				activeTools: [...this.#activeTools],
 				inbox: [...this.#inbox],
 				tasks: [...this.#tasks.values()],
+				...(this.#latestFlow === undefined ? {} : { flow: this.#latestFlow }),
 				...(this.#latestProgress === undefined ? {} : { progress: this.#latestProgress }),
 				...(partial === undefined ? {} : { partial }),
 			},

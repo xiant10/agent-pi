@@ -105,6 +105,59 @@ class SearchIndex {
 	}
 }
 
+/** What search, skills and preloading read: the shared catalog, or a tenant's view of it. */
+export type CatalogView = Pick<ToolCatalog, "get" | "entries" | "search" | "match">;
+
+/**
+ * The shared catalog plus one tenant's own tools, for that tenant's sessions only. A tenant tool whose offered name is
+ * a shared tool's is dropped, so a tenant can never shadow a platform tool.
+ */
+export class ScopedCatalog implements CatalogView {
+	readonly #base: ToolCatalog;
+	readonly #own: readonly CatalogEntry[];
+	readonly #byName: ReadonlyMap<string, CatalogEntry>;
+	#index: SearchIndex | undefined;
+	#indexedSize = -1;
+
+	constructor(base: ToolCatalog, own: readonly CatalogEntry[]) {
+		this.#base = base;
+		this.#own = own;
+		this.#byName = new Map(own.map((entry) => [entry.name, entry]));
+	}
+
+	/** The tenant's own tools, without any a shared tool shadows now. */
+	own(): readonly CatalogEntry[] {
+		return this.#own.filter((entry) => this.#base.get(entry.name) === undefined);
+	}
+
+	get(name: string): CatalogEntry | undefined {
+		return this.#base.get(name) ?? this.#byName.get(name);
+	}
+
+	entries(server?: string): readonly CatalogEntry[] {
+		const own = this.own();
+		if (server !== undefined) return [...this.#base.entries(server), ...own.filter((entry) => entry.server === server)];
+		return [...this.#base.entries(), ...own];
+	}
+
+	search(query: string, limit: number, accept: (entry: CatalogEntry) => boolean = () => true): SearchHit[] {
+		// The shared catalog changes as servers connect, so the index is rebuilt when its size does.
+		const entries = this.entries();
+		if (this.#index === undefined || this.#indexedSize !== entries.length) {
+			this.#index = new SearchIndex(entries);
+			this.#indexedSize = entries.length;
+		}
+		return this.#index.search(query, limit, accept);
+	}
+
+	match(patterns: readonly string[]): string[] {
+		const compiled = patterns.map(compilePattern);
+		return this.entries()
+			.filter((entry) => compiled.some((matches) => matches(entry)))
+			.map((entry) => entry.name);
+	}
+}
+
 /**
  * Every MCP tool of every connected server, keyed by offered name. Servers replace their own entries as a unit when
  * they connect or refresh, so one server's list never disturbs another's.

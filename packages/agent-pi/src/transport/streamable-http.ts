@@ -41,6 +41,9 @@ export const CORE_METHODS = [
 	"session.retry",
 	"session.close",
 	"skills.list",
+	"skills.checkFlow",
+	"skills.get",
+	"skills.tools",
 ] as const;
 
 export type RpcId = string | number | null;
@@ -207,7 +210,51 @@ async function dispatch(
 			await service.close(principal, session(), context);
 			return { result: { closed: true } };
 		case "skills.list":
-			return { result: { skills: service.skills.map((skill) => ({ name: skill.name, description: skill.description })) } };
+			return {
+				result: {
+					skills: (await service.skillsFor(principal)).map((skill) => ({
+						name: skill.name,
+						description: skill.description,
+						tools: skill.tools,
+						...(skill.flow === undefined ? {} : { flow: skill.flow }),
+						...(skill.source === undefined ? {} : { source: skill.source }),
+					})),
+				},
+			};
+		case "skills.get": {
+			if (typeof params.skill !== "string" || params.skill.length === 0) throw invalidParams("skill must be a non-empty string");
+			const skill = await service.skill(principal, params.skill);
+			return {
+				result: {
+					skill: {
+						name: skill.name,
+						description: skill.description,
+						tools: skill.tools,
+						keywords: skill.keywords,
+						body: skill.body,
+						files: skill.fileNames,
+						...(skill.flow === undefined ? {} : { flow: skill.flow }),
+						...(skill.source === undefined ? {} : { source: skill.source }),
+					},
+				},
+			};
+		}
+		case "skills.tools":
+			return {
+				result: {
+					tools: (await service.tools(principal)).map((entry) => ({ name: entry.name, server: entry.server, tool: entry.mcpName, description: entry.description })),
+				},
+			};
+		case "skills.checkFlow": {
+			// Saves nothing: a tenant admin publishes at t10-agent-control, and this says first what the harness will refuse.
+			if (typeof params.skill !== "string" || params.skill.length === 0) throw invalidParams("skill must be a non-empty string");
+			if (typeof params.flow !== "object" || params.flow === null || Array.isArray(params.flow)) {
+				throw invalidParams("flow must be an object");
+			}
+			const tools = Array.isArray(params.tools) ? params.tools.filter((tool): tool is string => typeof tool === "string") : undefined;
+			const checked = service.checkFlow(params.skill, params.flow as never, tools === undefined ? {} : { tools });
+			return { result: { skill: params.skill, ...checked } };
+		}
 		default: {
 			const method = service.pluginMethod(request.method);
 			if (method === undefined) throw new AppError("method_not_found", 404, RPC.methodNotFound, `unknown method ${request.method}`);

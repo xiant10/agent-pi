@@ -53,6 +53,8 @@ export type McpServerConfig =
 			readonly cwd?: string;
 	  });
 
+type HttpServerConfig = Extract<McpServerConfig, { transport: "http" }>;
+
 export type McpManagerOptions = {
 	readonly catalog: ToolCatalog;
 	readonly log: Logger;
@@ -191,20 +193,46 @@ export class McpManager {
 			_meta === undefined
 				? client.callTool(entry.mcpName, args, options)
 				: client.request<CallToolResult>("tools/call", { name: entry.mcpName, arguments: args, _meta }, options);
-		if (config.transport === "http" && config.auth === "grant") {
-			const key = await caller?.key();
-			if (caller === undefined || key === undefined) throw new McpUnavailableError("This tool needs an agent grant, and this run has none.");
-			const user = this.#grantClient(server, key, await caller.token());
-			user.calls++;
-			try {
-				return await call(await user.client);
-			} finally {
-				user.calls--;
-				if (user.retired && user.calls === 0) this.#closeClient(user);
-			}
-		}
+		if (config.transport === "http" && config.auth === "grant") return this.#viaGrant(config, entry, caller, call);
 		const client = server.client ?? (await this.#connect(server));
 		return call(client);
+	}
+
+	/**
+	 * Call a tenant connector's tool through the tool gateway at `url`, over a connection of the run's own grant. The
+	 * gateway holds the connector's address and credential; this process never does.
+	 */
+	async callConnector(
+		url: string,
+		connectorId: string,
+		entry: CatalogEntry,
+		args: Record<string, unknown>,
+		caller: McpCaller | undefined,
+		signal: AbortSignal | undefined,
+	): Promise<CallToolResult> {
+		if (this.#closed) throw new McpUnavailableError("MCP manager is closed");
+		// Keyed by connector ID, never its name, which another tenant may also use.
+		const config: HttpServerConfig = { name: `connector:${connectorId}`, transport: "http", url, auth: "grant" };
+		const options = { timeoutMs: 60_000, onProgress: () => undefined, ...(signal === undefined ? {} : { signal }) };
+		return this.#viaGrant(config, entry, caller, (client) => client.callTool(entry.mcpName, args, options));
+	}
+
+	async #viaGrant(
+		config: HttpServerConfig,
+		entry: CatalogEntry,
+		caller: McpCaller | undefined,
+		call: (client: McpClient) => Promise<CallToolResult>,
+	): Promise<CallToolResult> {
+		const key = await caller?.key();
+		if (caller === undefined || key === undefined) throw new McpUnavailableError(`${entry.name} needs an agent grant, and this run has none.`);
+		const user = this.#grantClient(config, key, await caller.token());
+		user.calls++;
+		try {
+			return await call(await user.client);
+		} finally {
+			user.calls--;
+			if (user.retired && user.calls === 0) this.#closeClient(user);
+		}
 	}
 
 	async close(): Promise<void> {
@@ -297,8 +325,7 @@ export class McpManager {
 	}
 
 	/** The grant's connection for this token. Tokens last minutes, so rotation must not touch a call still running. */
-	#grantClient(server: ServerState, grantId: string, token: string): GrantClient {
-		const config = server.config as Extract<McpServerConfig, { transport: "http" }>;
+	#grantClient(config: HttpServerConfig, grantId: string, token: string): GrantClient {
 		const key = `${config.name}\0${grantId}`;
 		const existing = this.#grantClients.get(key);
 		if (existing !== undefined && existing.token === token) {

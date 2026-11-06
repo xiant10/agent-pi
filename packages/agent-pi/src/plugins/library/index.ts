@@ -1,12 +1,13 @@
 /** Ready-made plugins for agent-pi apps. Optional: the harness never loads them on its own. */
 import type { JsonObject } from "@earendil-works/pi-durable";
+import { flowRunner } from "../../flow/plugin.ts";
 import type { PluginCatalog } from "../types.ts";
 import { audit } from "./audit.ts";
 import { clock } from "./clock.ts";
 import { guardrails } from "./guardrails.ts";
 import { shortcuts } from "./shortcuts.ts";
 
-export { audit, clock, guardrails, shortcuts };
+export { audit, clock, flowRunner, guardrails, shortcuts };
 export type { Faq } from "./shortcuts.ts";
 
 function text(options: JsonObject, name: string): string {
@@ -19,6 +20,7 @@ function text(options: JsonObject, name: string): string {
 export const builtinPlugins: PluginCatalog = {
 	audit: () => audit,
 	clock: (options) => clock({ timeZone: text(options, "timeZone") }),
+	"flow-runner": () => flowRunner(),
 	guardrails: () => guardrails,
 	shortcuts: (options, { resolve }) =>
 		shortcuts({ faqFile: resolve(text(options, "faqFile")), assistantName: text(options, "assistantName") }),

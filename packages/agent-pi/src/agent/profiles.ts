@@ -1,7 +1,7 @@
 import type { ModelRef } from "@earendil-works/pi-durable";
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { Skill } from "../skills/skills.ts";
-import type { ToolCatalog } from "../tools/catalog.ts";
+import type { CatalogView, ToolCatalog } from "../tools/catalog.ts";
 
 /** How a session runs. Chosen at `session.create`; voice and chat clients want different trade-offs. */
 export type Profile = {
@@ -42,7 +42,7 @@ export function pinnedTools(profile: Profile, catalog: ToolCatalog): string[] {
 export function preloadTools(
 	input: string,
 	profile: Profile,
-	catalog: ToolCatalog,
+	catalog: CatalogView,
 	skills: readonly Skill[],
 ): string[] {
 	const { maxTools, minScore } = profile.preload;
@@ -54,7 +54,19 @@ export function preloadTools(
 		for (const name of catalog.match(skill.tools)) if (!chosen.includes(name)) chosen.push(name);
 	}
 	for (const hit of catalog.search(input, maxTools)) {
-		if (hit.score >= minScore && !chosen.includes(hit.entry.name)) chosen.push(hit.entry.name);
+		if (hit.score >= minScore) {
+			if (!chosen.includes(hit.entry.name)) chosen.push(hit.entry.name);
+			// If this tool belongs to a skill, also preload companion tools from that skill so
+			// the agent is not left with half of a toolset (e.g. knowledge_search without knowledge_sets).
+			for (const skill of skills) {
+				const matchedTools = catalog.match(skill.tools);
+				if (matchedTools.includes(hit.entry.name)) {
+					for (const sibling of matchedTools) {
+						if (!chosen.includes(sibling)) chosen.push(sibling);
+					}
+				}
+			}
+		}
 	}
 	return chosen.slice(0, maxTools);
 }
