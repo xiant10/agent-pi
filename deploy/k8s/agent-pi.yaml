@@ -98,7 +98,7 @@ spec:
             - name: TOOL_GATEWAY_URL
               value: http://ai-gateway-tools.t10.svc.cluster.local:18095
             - name: GRANT_ACTIONS
-              value: agent:use,work:read,work:write,knowledge:read,property:read
+              value: agent:use,work:read,work:write,knowledge:read,property:read,property:propose
             - name: GRANT_AUDIENCES
               value: agent-pi,t10-collab,t10-knowledge,t10-property,ai-gateway-tools
             # Concurrency & capacity limits
