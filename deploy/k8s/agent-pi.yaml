@@ -91,13 +91,15 @@ spec:
               value: http://ai-gateway-tools.t10.svc.cluster.local:18095/mcp/collab
             - name: KNOWLEDGE_MCP_URL
               value: http://ai-gateway-tools.t10.svc.cluster.local:18095/mcp/knowledge
+            - name: PROPERTY_MCP_URL
+              value: http://ai-gateway-tools.t10.svc.cluster.local:18095/mcp/property
             # Tenants' own connectors, at /mcp/connector/<id>, when AGENT_CONTROL_URL is set.
             - name: TOOL_GATEWAY_URL
               value: http://ai-gateway-tools.t10.svc.cluster.local:18095
             - name: GRANT_ACTIONS
-              value: agent:use,work:read,work:write,knowledge:read
+              value: agent:use,work:read,work:write,knowledge:read,property:read
             - name: GRANT_AUDIENCES
-              value: agent-pi,t10-collab,t10-knowledge,ai-gateway-tools
+              value: agent-pi,t10-collab,t10-knowledge,t10-property,ai-gateway-tools
             # Concurrency & capacity limits
             - name: MAX_RUNS
               value: "1500"
