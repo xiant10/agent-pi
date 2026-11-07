@@ -84,7 +84,7 @@
 	"mcpServers": [
 		{ "name": "collab", "transport": "http", "url": "${COLLAB_MCP_URL:-}", "auth": "grant", "prefix": "", "agentContext": true },
 		{ "name": "knowledge", "transport": "http", "url": "${KNOWLEDGE_MCP_URL:-}", "auth": "grant", "prefix": "", "agentContext": true },
-		{ "name": "property", "transport": "http", "url": "${PROPERTY_MCP_URL:-}", "auth": "grant", "prefix": "", "agentContext": true }
+		{ "name": "modules", "transport": "http", "url": "${MODULES_MCP_URL:-}", "auth": "grant", "prefix": "", "agentContext": true }
 	],
 	"limits": {
 		"maxSessionsPerUser": "${MAX_SESSIONS_PER_USER:-1000}",

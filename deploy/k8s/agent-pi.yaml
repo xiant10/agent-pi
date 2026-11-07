@@ -91,8 +91,9 @@ spec:
               value: http://ai-gateway-tools.t10.svc.cluster.local:18095/mcp/collab
             - name: KNOWLEDGE_MCP_URL
               value: http://ai-gateway-tools.t10.svc.cluster.local:18095/mcp/knowledge
-            - name: PROPERTY_MCP_URL
-              value: http://ai-gateway-tools.t10.svc.cluster.local:18095/mcp/property
+            # Every module the gateway offers together. A new module needs no entry here.
+            - name: MODULES_MCP_URL
+              value: http://ai-gateway-tools.t10.svc.cluster.local:18095/mcp/modules
             # Tenants' own connectors, at /mcp/connector/<id>, when AGENT_CONTROL_URL is set.
             - name: TOOL_GATEWAY_URL
               value: http://ai-gateway-tools.t10.svc.cluster.local:18095
