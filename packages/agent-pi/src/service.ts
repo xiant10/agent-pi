@@ -45,7 +45,7 @@ import { activateTools, refreshSkills } from "./tools/activation.ts";
 import { type TranscriptMessage, transcriptOf, withNote } from "./transcript.ts";
 import type { CatalogEntry, CatalogView, ToolCatalog } from "./tools/catalog.ts";
 import type { Logger } from "./util/log.ts";
-import { startSpan, traceIdOf, type TraceSpan } from "./util/tracing.ts";
+import { errorClass, SESSION_ATTRIBUTE, startSpan, traceIdOf, type TraceSpan } from "./util/tracing.ts";
 
 export type ServiceDeps = {
 	readonly acknowledgement?: (input: string, sessionId: string, turnId: string, principal: Principal, signal: AbortSignal) => Promise<string>;
@@ -534,7 +534,7 @@ export class AgentService {
 			this.#deps.log.debug("prompt.plugin_reply", { sessionId, plugin: reply.plugin, placement: reply.placement });
 			if (!reply.duplicate) {
 				this.#deps.plugins.afterRun(conversation.id, session, { turnId: reply.turnId, status: "done", text: reply.text, answeredBy: reply.plugin });
-				startSpan("agent.reply", { traceparent: options.traceparent, attributes: { "agentpi.session_id": sessionId, "turn.id": turnId, "agent.answered_by": reply.plugin } }).end();
+				startSpan("agent.reply", { traceparent: options.traceparent, attributes: { [SESSION_ATTRIBUTE]: sessionId, "turn.id": turnId, "agent.answered_by": reply.plugin } }).end();
 			}
 			return { kind: "reply", conversationId: conversation.id, profile, turnId: reply.turnId, text: reply.text, plugin: reply.plugin, placement: reply.placement };
 		}
@@ -586,7 +586,7 @@ export class AgentService {
 
 		// A retry's span is its first attempt's. Model and tool spans go under this one, wherever the run's work lands.
 		const span = earlier === undefined
-			? startSpan("agent.submission", { traceparent: options.traceparent, attributes: { "agentpi.session_id": sessionId, "turn.id": turnId } })
+			? startSpan("agent.submission", { traceparent: options.traceparent, attributes: { [SESSION_ATTRIBUTE]: sessionId, "turn.id": turnId } })
 			: undefined;
 		try {
 			// With a known `requestId`, durable returns the existing submission and ignores the content.
@@ -628,7 +628,7 @@ export class AgentService {
 			if (span !== undefined) this.#settleSpan(span, submission, placement);
 			return { kind: "run", submission, conversationId: conversation.id, profile, turnId: turn, placement };
 		} catch (error) {
-			span?.end(String(error));
+			span?.end(errorClass(error));
 			throw error;
 		}
 	}
@@ -640,7 +640,7 @@ export class AgentService {
 				span.setAttributes({ "agent.status": settled.status, ...(settled.reason === undefined ? {} : { "agent.reason": settled.reason }) });
 				span.end();
 			},
-			(error: unknown) => span.end(String(error)),
+			(error: unknown) => span.end(errorClass(error)),
 		);
 	}
 
@@ -759,7 +759,7 @@ export class AgentService {
 				if (!child) return turnOfInput(this.#deps.harness, conversation.id, input, BACKGROUND_CONTEXT);
 				return (await currentWork())?.turnId;
 			},
-			observe: toolSpans(async () => (await currentWork())?.traceparent),
+			observe: toolSpans(async () => (await currentWork())?.traceparent, this.#deps.store.publicId((session.parent as ConversationId | undefined) ?? conversation.id)),
 		});
 	}
 

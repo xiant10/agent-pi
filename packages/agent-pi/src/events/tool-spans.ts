@@ -1,16 +1,16 @@
-import { startSpan, type TraceSpan } from "../util/tracing.ts";
+import { SESSION_ATTRIBUTE, startSpan, type TraceSpan } from "../util/tracing.ts";
 import type { ClientEventBody } from "./mapper.ts";
 
 /**
  * Spans of a session's tool calls, from its events. Events rather than durable hooks because hooks can replay, which
  * would report a call twice; a process that dies mid-call loses that span instead.
  */
-export function toolSpans(traceparent: () => Promise<string | undefined>): (event: ClientEventBody) => void {
+export function toolSpans(traceparent: () => Promise<string | undefined>, sessionId: string): (event: ClientEventBody) => void {
 	const open = new Map<string, Promise<TraceSpan>>();
 	return (event) => {
 		if (event.type === "tool.started") {
 			const startTime = Date.now();
-			const attributes = { "tool.name": event.name, "tool.call_id": event.callId };
+			const attributes = { [SESSION_ATTRIBUTE]: sessionId, "tool.name": event.name, "tool.call_id": event.callId };
 			open.set(
 				event.callId,
 				traceparent()

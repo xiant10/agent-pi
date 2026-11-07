@@ -10,6 +10,9 @@ import { type Attributes, isSpanContextValid, ROOT_CONTEXT, SpanStatusCode, trac
  */
 const tracer = trace.getTracer("agent-pi");
 
+/** Names a chat session on its spans. Each turn is its own trace; this is what finds all of a session's turns. */
+export const SESSION_ATTRIBUTE = "t10.session.id";
+
 const TRACEPARENT = /^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/;
 
 export function validTraceparent(value: string): boolean {
@@ -20,6 +23,11 @@ export function validTraceparent(value: string): boolean {
 /** The trace a `traceparent` belongs to. */
 export function traceIdOf(traceparent: string | undefined): string | undefined {
 	return traceparent === undefined ? undefined : TRACEPARENT.exec(traceparent)?.[1];
+}
+
+/** What a span may say about a failure. An error's message can quote a person's words, so it stays off the span. */
+export function errorClass(error: unknown): string {
+	return error instanceof Error ? error.name : "error";
 }
 
 export type TraceSpan = {

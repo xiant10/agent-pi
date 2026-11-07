@@ -158,7 +158,7 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 					log,
 					changed: (tenantId, tools) => {
 						if (tools.catalog.own().length === 0) registry.uninstall(defineExtension({ name: tenantExtensionName(tenantId) }));
-						else registry.install(tenantExtension(tenantId, tools, mcp, grants, config.tenantConnectors!.gatewayUrl));
+						else registry.install(tenantExtension(tenantId, tools, mcp, grants, config.tenantConnectors!.gatewayUrl, (id) => store.publicId(id)));
 						log.info("connectors.tenant_changed", { tenant: tenantId, tools: tools.catalog.own().length });
 					},
 				});
@@ -238,7 +238,7 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 		if (pluginServers.has(server) || server === SUBAGENT_SERVER) return;
 		const entries = catalog.entries(server);
 		if (entries.length === 0) registry.uninstall(defineExtension({ name: mcpExtensionName(server) }));
-		else registry.install(mcpExtension(server, entries, mcp, grants));
+		else registry.install(mcpExtension(server, entries, mcp, grants, (id) => store.publicId(id)));
 	});
 	for (const [plugin, entries] of plugins.toolEntries()) {
 		const conflicts = catalog.setServer(plugin, entries);

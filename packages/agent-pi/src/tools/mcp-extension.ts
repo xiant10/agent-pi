@@ -14,7 +14,7 @@ import { type CallToolResult, toLlmContent } from "@earendil-works/pi-mcp";
 import type { ConversationId } from "@earendil-works/pi-durable";
 import { readSession } from "../agent/docs.ts";
 import type { GrantBroker } from "../auth/grants.ts";
-import { HOPS_META, TURN_META, workTurn } from "../identity.ts";
+import { GATEWAY_IDENTITY_HEADERS, HOPS_META, TURN_META, workTurn } from "../identity.ts";
 import type { McpCaller, McpManager } from "../mcp/manager.ts";
 import type { CatalogEntry } from "./catalog.ts";
 import type { TenantTools } from "./tenant.ts";
@@ -61,6 +61,7 @@ export function tenantExtension(
 	manager: McpManager,
 	grants: GrantBroker | undefined,
 	gatewayUrl: string,
+	publicId: (conversationId: ConversationId) => string,
 ): Extension {
 	const base = gatewayUrl.replace(/\/+$/, "");
 	return defineExtension({
@@ -74,7 +75,7 @@ export function tenantExtension(
 				}
 				const id = tools.connectors.get(entry.server);
 				if (id === undefined || grants === undefined) throw new Error(`${entry.name} isn't available right now.`);
-				return manager.callConnector(`${base}/mcp/connector/${encodeURIComponent(id)}`, id, entry, args, grantCaller(grants, api.conversationId), context.abortSignal);
+				return manager.callConnector(`${base}/mcp/connector/${encodeURIComponent(id)}`, id, entry, args, grantCaller(grants, api, context, publicId), context.abortSignal);
 			}),
 		),
 	});
@@ -89,6 +90,7 @@ export function mcpExtension(
 	entries: readonly CatalogEntry[],
 	manager: McpManager,
 	grants: GrantBroker | undefined,
+	publicId: (conversationId: ConversationId) => string,
 ): Extension {
 	return defineExtension({
 		name: mcpExtensionName(server),
@@ -98,7 +100,7 @@ export function mcpExtension(
 				if (!manager.allowsTenant(entry, session?.tenantId)) {
 					return { content: [{ type: "text", text: "This tool isn't available to this tenant." }], isError: true };
 				}
-				const caller = grants === undefined ? undefined : grantCaller(grants, api.conversationId);
+				const caller = grants === undefined ? undefined : grantCaller(grants, api, context, publicId);
 				return manager.callTool(entry, args, caller, context.abortSignal, () => callMeta(api, context));
 			}),
 		),
@@ -106,10 +108,22 @@ export function mcpExtension(
 }
 
 /** Tool calls run under the conversation's grant, whether the user is online or not. */
-function grantCaller(grants: GrantBroker, conversationId: ConversationId): McpCaller {
+function grantCaller(grants: GrantBroker, api: ToolExecutionApi, context: Context, publicId: (conversationId: ConversationId) => string): McpCaller {
+	const conversationId = api.conversationId;
 	return {
 		key: async () => (await grants.grantOf(conversationId))?.grantId,
 		token: () => grants.token(conversationId),
+		callHeaders: async () => {
+			const session = await readSession(api, conversationId, context);
+			const turn = await workTurn(api, conversationId, session, context);
+			// A child conversation works for its parent's session, as its model calls do.
+			const owner = (session?.parent as ConversationId | undefined) ?? conversationId;
+			return {
+				[GATEWAY_IDENTITY_HEADERS.sessionId!]: publicId(owner),
+				...(turn === undefined ? {} : { [GATEWAY_IDENTITY_HEADERS.turnId!]: turn.turnId }),
+				...(turn?.traceparent === undefined ? {} : { traceparent: turn.traceparent }),
+			};
+		},
 	};
 }
 

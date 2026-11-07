@@ -16,7 +16,7 @@ import {
 import { readSession, type SessionState } from "./agent/docs.ts";
 import type { Principal } from "./auth/authenticator.ts";
 import type { CredentialStore } from "./auth/credentials.ts";
-import { startSpan } from "./util/tracing.ts";
+import { errorClass, SESSION_ATTRIBUTE, startSpan } from "./util/tracing.ts";
 
 /**
  * Who a model call is for, so a gateway in front of the model can audit it: the session (a whole conversation), the
@@ -302,11 +302,12 @@ export function withModelSpans(streams: ProviderStreams, registry: IdentityRegis
 		options: T | undefined,
 		send: (options: T | undefined) => ReturnType<ProviderStreams["stream"]>,
 	) => {
-		const parent = registry.get(options?.sessionId)?.traceparent;
+		const identity = registry.get(options?.sessionId);
+		const parent = identity?.traceparent;
 		if (parent === undefined) return send(options);
 		const span = startSpan("agent.model", {
 			traceparent: parent,
-			attributes: { "gen_ai.provider.name": model.provider, "gen_ai.request.model": model.id },
+			attributes: { [SESSION_ATTRIBUTE]: identity!.sessionId, "gen_ai.provider.name": model.provider, "gen_ai.request.model": model.id },
 		});
 		const headers: ProviderHeaders = { ...options?.headers };
 		if (forward && span.traceparent !== undefined) headers.traceparent = span.traceparent;
@@ -318,9 +319,10 @@ export function withModelSpans(streams: ProviderStreams, registry: IdentityRegis
 					"gen_ai.usage.input_tokens": message.usage.input,
 					"gen_ai.usage.output_tokens": message.usage.output,
 				});
-				span.end(message.stopReason === "error" ? (message.errorMessage ?? "model error") : undefined);
+				// A provider's error text can quote the prompt, so only the fact goes on the span.
+				span.end(message.stopReason === "error" ? "model error" : undefined);
 			},
-			(error: unknown) => span.end(String(error)),
+			(error: unknown) => span.end(errorClass(error)),
 		);
 		return stream;
 	};

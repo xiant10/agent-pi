@@ -130,10 +130,10 @@ describe("a traced turn", () => {
 		const [model] = spans("agent.model");
 		expect(submission!.spanContext().traceId).toBe(TRACE_ID);
 		expect(parentId(submission!)).toBe("00f067aa0ba902b7");
-		expect(submission!.attributes).toMatchObject({ "agentpi.session_id": sessionId, "turn.id": TRACE_ID, "agent.status": "done" });
+		expect(submission!.attributes).toMatchObject({ "t10.session.id": sessionId, "turn.id": TRACE_ID, "agent.status": "done" });
 		expect(model!.spanContext().traceId).toBe(TRACE_ID);
 		expect(parentId(model!)).toBe(submission!.spanContext().spanId);
-		expect(model!.attributes).toMatchObject({ "gen_ai.request.model": "m", "gen_ai.usage.input_tokens": 11, "gen_ai.usage.output_tokens": 3 });
+		expect(model!.attributes).toMatchObject({ "t10.session.id": sessionId, "gen_ai.request.model": "m", "gen_ai.usage.input_tokens": 11, "gen_ai.usage.output_tokens": 3 });
 		expect(seen[0]!.traceparent).toBe(`00-${TRACE_ID}-${model!.spanContext().spanId}-01`);
 		expect(seen[0]!["x-turn-id"]).toBe(TRACE_ID);
 	});
@@ -144,6 +144,8 @@ describe("a traced turn", () => {
 		await prompt(agentUrl, await session(agentUrl), "hi");
 		await waitFor(() => spans("agent.model").length >= 1);
 		expect(spans("agent.model")[0]!.status.code).toBe(2);
+		// A provider's error text can quote the prompt.
+		expect(spans("agent.model")[0]!.status.message).toBe("model error");
 	});
 
 	it("starts a trace of its own for a client that sends none, or a malformed one", async () => {
@@ -210,7 +212,7 @@ describe("a traced turn", () => {
 });
 
 describe("toolSpans", () => {
-	const observe = () => toolSpans(async () => TRACEPARENT);
+	const observe = () => toolSpans(async () => TRACEPARENT, "session-1");
 	const started: ClientEventBody = { type: "tool.started", callId: "1", name: "lookup" };
 
 	it("spans a call from start to finish", async () => {

@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
 	type CallToolResult,
 	McpClient,
@@ -93,6 +94,19 @@ type GrantClient = { client: Promise<McpClient>; token: string; lastUsed: number
 export type McpCaller = {
 	readonly key: () => Promise<string | undefined>;
 	readonly token: () => Promise<string>;
+	/** Headers for this call alone: its turn, session and trace, for the tool gateway's spans and audit record. */
+	readonly callHeaders?: () => Promise<Readonly<Record<string, string>>>;
+};
+
+/** A connection is shared between calls, so what belongs to one call reaches its request from here. */
+const callHeaders = new AsyncLocalStorage<Readonly<Record<string, string>>>();
+
+const fetchWithCallHeaders: typeof fetch = (input, init) => {
+	const extra = callHeaders.getStore();
+	if (extra === undefined) return fetch(input, init);
+	const headers = new Headers(init?.headers);
+	for (const [name, value] of Object.entries(extra)) headers.set(name, value);
+	return fetch(input, { ...init, headers });
 };
 
 const CLIENT_INFO = { name: "agent-pi", version: "0.1.0" };
@@ -228,7 +242,10 @@ export class McpManager {
 		const user = this.#grantClient(config, key, await caller.token());
 		user.calls++;
 		try {
-			return await call(await user.client);
+			const client = await user.client;
+			// Only grant servers get these: they're t10's own, and the gateway strips them before a tenant's server.
+			const headers = await caller.callHeaders?.().catch(() => undefined);
+			return await (headers === undefined ? call(client) : callHeaders.run(headers, () => call(client)));
 		} finally {
 			user.calls--;
 			if (user.retired && user.calls === 0) this.#closeClient(user);
@@ -410,6 +427,7 @@ export function defaultTransport(config: McpServerConfig, headers: Readonly<Reco
 	return new StreamableHttpTransport({
 		url: config.url,
 		headers: { ...headers },
+		fetch: fetchWithCallHeaders,
 		...(config.auth === "bearer" && config.bearer !== undefined ? { authProvider: bearerProvider(config.bearer) } : {}),
 	});
 }
