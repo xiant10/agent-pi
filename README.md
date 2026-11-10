@@ -1,22 +1,20 @@
 # agent-pi
 
-A reusable multi-user agent harness on [`@earendil-works/pi-durable`](https://www.npmjs.com/package/@earendil-works/pi-durable), and the apps built on it.
+A reusable multi-user agent harness built on [`@earendil-works/pi-durable`](https://www.npmjs.com/package/@earendil-works/pi-durable), and the apps built on it.
 
-- **Streamable HTTP** (the MCP 2025-06-18 transport shape) with JSON-RPC methods, SSE responses, and a resumable event stream.
-- **JWT auth** before anything else runs.
-- **Steering and barge-in**: `session.steer` joins running work; `session.interrupt` stops it and answers the new input.
-- **Skills** that load instructions and activate their tools on demand.
-- **Hundreds of MCP tools**: all registered, few offered per request, found by skills, search, or preloading.
-- **Delegation**: declared sub-agents as tools, and an agent offered to others over MCP. See [docs/delegation.md](docs/delegation.md).
-- **Voice output**: `speech` events carry speakable sentences as they stream; a fast model talks, `consult_expert` reasons.
-- **Durable**: sessions, runs, and tool calls are committed to SQLite; a restarted container continues unfinished runs.
-- **Plugins and IoC**: business logic lives in the app; the harness exposes hooks before and after the model, around
-  tools, and on the session lifecycle, and plugins can answer without the model while still writing to the conversation history.
+## Project Description
 
-Building a new agent on the package: [`docs/developer-guide.md`](docs/developer-guide.md). Design and rationale:
-[`docs/design.md`](docs/design.md). End-to-end lifecycle with every plugin hook point:
-[`docs/lifecycle.md`](docs/lifecycle.md). Testing without a real model:
-[`docs/mock-model.md`](docs/mock-model.md).
+**agent-pi** is the reference AI agent runtime harness for the t10 platform. It encapsulates agent conversational state, durable execution, prompt management, dynamic tool resolution, and multi-user session lifecycle across both text and voice modalities.
+
+### Key Capabilities
+
+- **Streamable HTTP**: Implements the MCP 2025-06-18 transport shape with JSON-RPC methods, SSE responses, and resumable event streams.
+- **JWT & Grant Verification**: Verifies ES256 identity tokens and delegated caller grants before running turns.
+- **Steering and Barge-in**: `session.steer` joins in-flight work; `session.interrupt` cancels running turns and addresses new input.
+- **Dynamic Skills & Tools**: Loads skill instructions and dynamically offers registered MCP tools on demand based on conversation context.
+- **Delegation**: Sub-agents declared as tools, and the harness itself offered as an agent over MCP.
+- **Voice Streaming Integration**: Generates `speech` events with speakable sentence chunks as they stream from the model.
+- **Durable Persistence**: Sessions, turns, and tool calls are committed to an integrated SQLite database, allowing restarted instances to resume pending work.
 
 ## Layout
 
