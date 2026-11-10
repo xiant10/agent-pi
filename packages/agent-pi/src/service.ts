@@ -12,6 +12,7 @@ import {
 	type Harness,
 	type JsonObject,
 	LiveDoc,
+	type ModelRef,
 	type Submission,
 	type SubmissionId,
 	type SubmissionRecord,
@@ -44,6 +45,7 @@ import { customSkill, overrideFlow, type SkillsFor, type TenantSkillContent, typ
 import { activateTools, refreshSkills } from "./tools/activation.ts";
 import { type TranscriptMessage, transcriptOf, withNote } from "./transcript.ts";
 import type { CatalogEntry, CatalogView, ToolCatalog } from "./tools/catalog.ts";
+import { skillOn, type TenantConfig, type TenantConfigs } from "./tenant-config.ts";
 import type { Logger } from "./util/log.ts";
 import { errorClass, SESSION_ATTRIBUTE, startSpan, traceIdOf, type TraceSpan } from "./util/tracing.ts";
 
@@ -63,6 +65,17 @@ export type ServiceDeps = {
 	readonly skillsFor: SkillsFor;
 	/** Pins each turn's skills when it's admitted. */
 	readonly pins: TurnPins;
+	/**
+	 * A tenant's customization of this agent: where it's read, which tools a version lets a session offer, and the model
+	 * entries it may name. Unset when the agent takes none.
+	 */
+	readonly configs?: {
+		readonly source: TenantConfigs;
+		readonly toolOn: (config: TenantConfig) => (entry: CatalogEntry) => boolean;
+		readonly model: (name: string) => ModelRef | undefined;
+	};
+	/** Who owns a tool as the tool gateway names it. The harness's own tools have none. */
+	readonly ownerOf?: (entry: CatalogEntry) => string | undefined;
 	/** Whether a tenant may use a catalog tool; tools of servers kept to some tenants aren't everyone's. Default: yes. */
 	readonly toolAllowed?: (entry: CatalogEntry, tenantId: string | undefined) => boolean;
 	readonly profiles: ReadonlyMap<string, Profile>;
@@ -173,9 +186,26 @@ export class AgentService {
 		return this.#deps.skills;
 	}
 
-	/** The skills the caller's tenant sees: built-in ones with its published overrides, and its own. */
-	skillsFor(principal: Principal): Promise<readonly Skill[]> {
-		return this.#deps.skillsFor(principal.tenantId);
+	/**
+	 * The skills the caller's tenant sees: built-in ones with its published overrides, and its own, less those its
+	 * customization of this agent turns off.
+	 */
+	async skillsFor(principal: Principal): Promise<readonly Skill[]> {
+		const skills = await this.#deps.skillsFor(principal.tenantId);
+		const config = await this.#deps.configs?.source.forPrincipal(principal.tenantId, principal.userId);
+		return config === undefined || config.skillsOff.length === 0 ? skills : skills.filter((skill) => skillOn(config, skill.name));
+	}
+
+	/** Who owns a tool as the tool gateway and a tenant's tool lists name it, or `undefined` for the harness's own. */
+	toolOwner(entry: CatalogEntry): string | undefined {
+		return this.#deps.ownerOf?.(entry);
+	}
+
+	/** The customization a session of this principal runs with: the owner's draft in their own test conversation. */
+	async #config(tenantId: string | undefined, userId: string, metadata: JsonObject | undefined): Promise<TenantConfig | undefined> {
+		const configs = this.#deps.configs;
+		if (configs === undefined) return undefined;
+		return metadata?.configDraft === true ? configs.source.draft(tenantId, userId) : configs.source.forPrincipal(tenantId, userId);
 	}
 
 	/** One skill as the caller's tenant sees it, with its instructions and the names of its files, for an editor. */
@@ -215,14 +245,24 @@ export class AgentService {
 		context: Context,
 	): Promise<SessionInfo> {
 		const profile = this.#profile(options.profile);
+		// The tenant's model is recorded with the session, as its profile is, so a later version doesn't move an existing
+		// conversation to another model. A profile that speaks keeps its own, fast one.
+		const config = await this.#config(principal.tenantId, principal.userId, options.metadata);
+		const on = config === undefined ? undefined : this.#deps.configs!.toolOn(config);
+		const pinned = pinnedTools(profile, this.#deps.catalog).filter((name) => on === undefined || isOn(this.#deps.catalog, name, on));
+		const model = config?.model === undefined || profile.speech ? undefined : this.#deps.configs!.model(config.model);
+		if (config?.model !== undefined && !profile.speech && model === undefined) {
+			this.#deps.log.warn("config.unknown_model", { model: config.model, version: config.version, using: "the profile's model" });
+		}
 		const { conversation, sessionId, existing } = await this.#deps.store.create(
 			principal,
 			profile,
-			pinnedTools(profile, this.#deps.catalog),
+			pinned,
 			options.metadata,
 			context,
 			options.transient,
 			options.requestKey,
+			model,
 		);
 		this.#deps.credentials.set(conversation.id, principal);
 		if (existing) {
@@ -504,13 +544,19 @@ export class AgentService {
 		// This turn's skills, before plugins run: the flow runner, the index and load_skill all read this pin.
 		// A skill editor's test conversation names the skill whose draft it tries; the author is always its owner.
 		const skillDraft = session.metadata?.skillDraft;
+		// The tenant's customization is pinned with the skills, so the whole turn, and any child it starts, sees one version.
+		const config = await this.#config(session.tenantId, session.userId, session.metadata);
 		const skills = await this.#deps.pins.start(
 			conversation.id,
 			session.tenantId,
 			typeof skillDraft === "string" && skillDraft !== "" ? { author: session.userId, name: skillDraft } : undefined,
+			config,
 		);
-		// The tenant's connector tools, which this turn's search, skills and preloading see.
-		const tools = (await this.#deps.toolsFor?.(session.tenantId)) ?? this.#deps.catalog;
+		// The tenant's connector tools, which this turn's search, skills and preloading see, cut to what it allows.
+		const view = (await this.#deps.toolsFor?.(session.tenantId)) ?? this.#deps.catalog;
+		const on = config === undefined ? undefined : this.#deps.configs!.toolOn(config);
+		const tools = on === undefined ? view : allowedView(view, on);
+		if (on !== undefined) await this.#withdraw(conversation, view, on, context);
 		await this.#deps.selectTenantTools?.(conversation, session.tenantId, context);
 		// A turn starts when the call arrives, whether or not the client named it.
 		const turnId = options.turnId ?? randomUUID();
@@ -555,7 +601,7 @@ export class AgentService {
 		const hasSkills =
 			earlier === undefined &&
 			Object.entries(state?.skills ?? {}).some(([skill, known]) => (skillTools(skill) ?? []).some((name) => !known.includes(name)));
-		const pinned = pinnedTools(profile, this.#deps.catalog);
+		const pinned = pinnedTools(profile, this.#deps.catalog).filter((name) => on === undefined || isOn(view, name, on));
 		let needsPreload = preload.length > 0;
 		if (needsPreload && !hasSkills) {
 			const agent = await this.#deps.harness.snapshot(AgentDoc, conversation.id, context);
@@ -642,6 +688,27 @@ export class AgentService {
 			},
 			(error: unknown) => span.end(errorClass(error)),
 		);
+	}
+
+	/**
+	 * Stop offering tools the tenant's customization turns off. A session keeps its offered tools from turn to turn, so a
+	 * tool turned off after it was offered is taken out here, before the turn's first request. Nothing changes, and the
+	 * prompt cache stays warm, while the tenant's choice does.
+	 */
+	async #withdraw(conversation: Conversation, view: CatalogView, on: (entry: CatalogEntry) => boolean, context: Context): Promise<void> {
+		const offered = (await this.#deps.harness.snapshot(AgentDoc, conversation.id, context))?.tools;
+		if (!Array.isArray(offered) || offered.every((name) => isOn(view, name, on))) return;
+		const withdrawn = await conversation.commit(async (tx) => {
+			const agent = await tx.doc(AgentDoc, conversation.id);
+			const state = await tx.doc(ToolStateDoc, conversation.id);
+			const current = Array.isArray(agent.tools) ? agent.tools : [];
+			const off = current.filter((name) => !isOn(view, name, on));
+			if (off.length === 0) return off;
+			agent.tools = current.filter((name) => !off.includes(name));
+			state.dynamic = state.dynamic.filter((name) => !off.includes(name));
+			return off;
+		}, context);
+		if (withdrawn.length > 0) this.#deps.log.debug("tools.turned_off", { conversationId: conversation.id, withdrawn });
 	}
 
 	/** What an earlier input with this `requestId` became: a plugin reply, a model run, or nothing yet. */
@@ -855,4 +922,23 @@ export class AgentService {
 		if (chars > max) throw invalidParams(`input is longer than ${max} characters`);
 		return blocks;
 	}
+}
+
+/** Whether a tool's offered name is one the tenant allows. A name the view doesn't know isn't a tenant's to judge. */
+function isOn(view: Pick<CatalogView, "get">, name: string, on: (entry: CatalogEntry) => boolean): boolean {
+	const entry = view.get(name);
+	return entry === undefined || on(entry);
+}
+
+/** A view of `view` holding only the tools `on` allows: what a turn's search, skills and preloading may offer. */
+function allowedView(view: CatalogView, on: (entry: CatalogEntry) => boolean): CatalogView {
+	return {
+		get: (name) => {
+			const entry = view.get(name);
+			return entry === undefined || !on(entry) ? undefined : entry;
+		},
+		entries: (server) => view.entries(server).filter(on),
+		search: (query, limit, accept = () => true) => view.search(query, limit, (entry) => on(entry) && accept(entry)),
+		match: (patterns) => view.match(patterns).filter((name) => isOn(view, name, on)),
+	};
 }

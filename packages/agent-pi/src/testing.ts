@@ -18,6 +18,8 @@ export type FakeTool = {
 	readonly name: string;
 	readonly description: string;
 	readonly inputSchema?: Record<string, unknown>;
+	/** The tool's `_meta` in `tools/list`, such as the module that owns it (`t10/module`). */
+	readonly meta?: Record<string, unknown>;
 	readonly call?: (args: Record<string, unknown>) => unknown | Promise<unknown>;
 };
 
@@ -43,6 +45,7 @@ export function fakeMcpServer(tools: readonly FakeTool[]) {
 							name: tool.name,
 							description: tool.description,
 							inputSchema: tool.inputSchema ?? { type: "object", properties: {} },
+							...(tool.meta === undefined ? {} : { _meta: tool.meta }),
 						})),
 					});
 				} else if (request.method === "tools/call") {

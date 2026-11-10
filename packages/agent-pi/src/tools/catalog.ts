@@ -7,6 +7,11 @@ export type CatalogEntry = {
 	readonly mcpName: string;
 	readonly description: string;
 	readonly inputSchema: Readonly<Record<string, unknown>>;
+	/**
+	 * The module that owns the tool, when its server serves several: the tool gateway's `/mcp/modules` says so in
+	 * `_meta` (`t10/module`). Otherwise the server owns it.
+	 */
+	readonly owner?: string;
 };
 
 export type SearchHit = { readonly entry: CatalogEntry; readonly score: number };

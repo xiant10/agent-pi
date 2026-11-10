@@ -45,6 +45,16 @@ export {
 	TurnPins,
 } from "./skills/tenant.ts";
 export {
+	configAllows,
+	readTenantConfig,
+	shippedConfig,
+	skillOn,
+	type TenantConfig,
+	TenantConfigs,
+	type TenantConfigsOptions,
+	tenantSection,
+} from "./tenant-config.ts";
+export {
 	FlowDoc,
 	type FlowBranchRule,
 	type FlowEdge,

@@ -104,6 +104,12 @@ export type AppConfig = {
 	 * `gatewayUrl` (`/mcp/connector/<id>`). Off when unset.
 	 */
 	readonly tenantConnectors?: { readonly gatewayUrl: string };
+	/**
+	 * Apply each tenant's customization of this agent, read from `t10-agent-control` at this URL as this runtime's
+	 * service account: its instructions, the tools and skills it turns off, and its model. `keepTools` are tools no
+	 * tenant turns off, named `owner:tool` as the tool gateway names them. Off when unset.
+	 */
+	readonly tenantConfig?: { readonly url: string; readonly keepTools: readonly string[] };
 	readonly mcpServers: readonly McpServerConfig[];
 	readonly limits: LimitsConfig;
 	/** Offer this agent over MCP; off when unset. */
@@ -123,6 +129,8 @@ const PLACEHOLDER = /\$\{([A-Za-z_][A-Za-z0-9_]*)(:-([^}]*))?\}/g;
 const AGENT_NAME = /^[a-z][a-z0-9_-]*$/;
 const EXPOSED_TOOL_NAME = /^[A-Za-z0-9_-]{1,64}$/;
 const SECTION_NAME = /^[a-z][a-z0-9_-]*$/;
+/** A tool named by its owner, `owner:tool`, as t10-agent-control and the tool gateway name it. */
+const OWNED_TOOL = /^[a-z][a-z0-9_-]*:[A-Za-z0-9_.*?-]+$/;
 const RESERVED_SECTIONS = new Set(["instructions", "skills", "profile"]);
 const THINKING: readonly ModelThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 const JWT_ALGORITHMS: readonly JwtAlgorithm[] = [
@@ -358,6 +366,13 @@ export function loadConfig(path: string): AppConfig {
 		if (!SECTION_NAME.test(name) || RESERVED_SECTIONS.has(name)) {
 			r.fail(`${at}.name`, `must match ${SECTION_NAME} and not be one of ${[...RESERVED_SECTIONS].join(", ")}`);
 		}
+		// Where a tenant's instructions go. It has no text of its own.
+		if (r.boolean(entry.slot, `${at}.slot`, false)) {
+			if (entry.file !== undefined) r.fail(`${at}.file`, "a slot has no file: the tenant's text goes there");
+			if (instructions.some((section) => section.slot === true)) r.fail(`${at}.slot`, "only one instruction can be the slot");
+			instructions.push({ name, content: "", tag: false, slot: true });
+			continue;
+		}
 		instructions.push({
 			name,
 			content: readText(r.string(entry.file, `${at}.file`), `${at}.file`),
@@ -392,6 +407,13 @@ export function loadConfig(path: string): AppConfig {
 	const gatewayUrl = r.optionalString(tenantConnectorsRaw.gatewayUrl, "tenantConnectors.gatewayUrl");
 	if (gatewayUrl !== undefined && gatewayUrl !== "" && (tenantSkillsUrl === undefined || tenantSkillsUrl === "")) {
 		r.fail("tenantConnectors", "needs tenantSkills.url, where connectors are published");
+	}
+	const tenantConfigRaw = r.optionalObject(raw.tenantConfig, "tenantConfig");
+	const tenantConfigUrl = r.optionalString(tenantConfigRaw.url, "tenantConfig.url");
+	if (tenantConfigUrl !== undefined && tenantConfigUrl !== "" && grants === undefined) r.fail("tenantConfig", "needs a grants section, for the runtime's service account");
+	const keepTools = r.strings(tenantConfigRaw.keepTools, "tenantConfig.keepTools");
+	for (const [index, tool] of keepTools.entries()) {
+		if (!OWNED_TOOL.test(tool)) r.fail(`tenantConfig.keepTools[${index}]`, "names a tool by its owner, as owner:tool");
 	}
 	const instanceId = r.optionalString(raw.instanceId, "instanceId");
 	if (instanceId !== undefined && !/^[A-Za-z0-9_-]+$/.test(instanceId)) r.fail("instanceId", "must match [A-Za-z0-9_-]+");
@@ -428,6 +450,7 @@ export function loadConfig(path: string): AppConfig {
 		...(skillsDir === undefined ? {} : { skillsDir: file(skillsDir) }),
 		...(tenantSkillsUrl === undefined || tenantSkillsUrl === "" ? {} : { tenantSkills: { url: tenantSkillsUrl } }),
 		...(gatewayUrl === undefined || gatewayUrl === "" ? {} : { tenantConnectors: { gatewayUrl } }),
+		...(tenantConfigUrl === undefined || tenantConfigUrl === "" ? {} : { tenantConfig: { url: tenantConfigUrl, keepTools } }),
 		mcpServers,
 		limits: {
 			maxSessionsPerUser: r.number(limits.maxSessionsPerUser, "limits.maxSessionsPerUser", 20),

@@ -13,6 +13,8 @@ export type RuntimeManifest = {
 	readonly bundle?: string;
 	readonly profiles: readonly string[];
 	readonly capabilities: readonly string[];
+	/** The model entries a tenant's customization may name, under the `tenant_config` capability. */
+	readonly models: readonly string[];
 	readonly builtin_tools: readonly string[];
 	/** Plugin JSON-RPC methods, under the `plugin_methods` capability. */
 	readonly methods: readonly string[];
@@ -38,6 +40,7 @@ export function runtimeManifest(fields: {
 	readonly bundle: string | undefined;
 	readonly profiles: readonly string[];
 	readonly capabilities: readonly string[];
+	readonly models: readonly string[];
 	readonly methods: readonly string[];
 }): RuntimeManifest {
 	return {
@@ -50,6 +53,7 @@ export function runtimeManifest(fields: {
 		...(fields.bundle === undefined || fields.bundle === "" ? {} : { bundle: fields.bundle }),
 		profiles: fields.profiles,
 		capabilities: fields.capabilities,
+		models: fields.models,
 		builtin_tools: [],
 		methods: fields.methods,
 	};

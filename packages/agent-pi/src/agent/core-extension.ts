@@ -22,7 +22,7 @@ import type { RunTracker } from "../runs.ts";
 import { readSkillFile, renderSkillIndex, type Skill } from "../skills/skills.ts";
 import type { SessionSkills } from "../skills/tenant.ts";
 import { activateSkill, activateTools } from "../tools/activation.ts";
-import type { CatalogView, ToolCatalog } from "../tools/catalog.ts";
+import type { CatalogEntry, CatalogView, ToolCatalog } from "../tools/catalog.ts";
 import { readSession, type SessionState } from "./docs.ts";
 import { EXPERT_TOOL, pinnedTools, type Profile } from "./profiles.ts";
 import { type ChildDeps, runChild, type Subagent, subagentTool } from "./subagents.ts";
@@ -31,8 +31,11 @@ import { backgroundTasks, CHILD_TASK_SECTION, PARENT_TASK_SECTION, PARENT_TASK_T
 export const CORE_EXTENSION = "agent.core";
 export const INSTRUCTIONS_EXTENSION = "agent.instructions";
 
-/** A named system prompt block, read from its own file at startup. */
-export type InstructionSection = { readonly name: string; readonly content: string; readonly tag?: boolean };
+/** A named system prompt block, read from its own file at startup. A slot has no text: a tenant's instructions go there. */
+export type InstructionSection = { readonly name: string; readonly content: string; readonly tag?: boolean; readonly slot?: boolean };
+
+/** A tenant's instructions for one request's conversation, under their heading, or none. */
+export type TenantText = PromptSection["render"];
 
 export type CoreDeps = ChildDeps & {
 	/** The skills a session's turn started with, which the index and `load_skill` use. */
@@ -50,6 +53,11 @@ export type CoreDeps = ChildDeps & {
 	readonly runs: RunTracker;
 	readonly harness: () => Harness;
 	readonly woken: (conversationId: ConversationId, session: Readonly<SessionState>, submission: Submission, turnId: string) => void;
+	/**
+	 * Which tools a session's tenant lets its turn offer and call, from the customization the turn pinned. `undefined`
+	 * when the agent takes no customization.
+	 */
+	readonly toolFilter?: (conversationId: ConversationId, session: Readonly<SessionState> | undefined) => Promise<((entry: CatalogEntry) => boolean) | undefined>;
 	readonly callCatalogTool?: (
 		api: ToolExecutionApi,
 		context: Context,
@@ -64,13 +72,14 @@ const SEARCH_LIMIT = 8;
  * The configured system prompt sections, installed first so they lead the prompt; plugin sections follow, then the
  * core extension's skill index and profile section.
  */
-export function instructionsExtension(instructions: readonly InstructionSection[]): Extension {
-	return defineExtension({
-		name: INSTRUCTIONS_EXTENSION,
-		sections: instructions.map((instruction) =>
-			section(instruction.name, () => instruction.content, instruction.tag === undefined ? undefined : { tag: instruction.tag }),
-		),
+export function instructionsExtension(instructions: readonly InstructionSection[], tenantText?: TenantText): Extension {
+	const sections = instructions.flatMap((instruction) => {
+		if (instruction.slot === true) return tenantText === undefined ? [] : [section(instruction.name, tenantText, { tag: false })];
+		return [section(instruction.name, () => instruction.content, instruction.tag === undefined ? undefined : { tag: instruction.tag })];
 	});
+	// With no slot, the tenant's text follows the agent's own instructions, so everything before it stays first.
+	if (tenantText !== undefined && !instructions.some((instruction) => instruction.slot === true)) sections.push(section("tenant", tenantText, { tag: false }));
+	return defineExtension({ name: INSTRUCTIONS_EXTENSION, sections });
 }
 
 /**
@@ -111,6 +120,14 @@ export function coreExtension(deps: CoreDeps): Extension {
 	}
 	const hooks = [
 		hook(ToolTask, {
+			// The offer is already cut to the tenant's choice; this catches a call to a tool turned off since.
+			beforeTool: async (call, api, context) => {
+				if (deps.toolFilter === undefined) return undefined;
+				const session = await readSession(api, api.conversationId, context);
+				const on = await deps.toolFilter(api.conversationId, session);
+				const entry = on === undefined ? undefined : (await deps.toolsFor(session?.tenantId)).get(call.name);
+				return entry === undefined || on!(entry) ? undefined : { block: TURNED_OFF };
+			},
 			afterTool: async (call, result, api, context) => {
 				if (call.name === "load_skill") return undefined;
 				const flowState = await api.snapshot(FlowDoc, api.conversationId, context);
@@ -209,7 +226,10 @@ function loadSkillTool(deps: CoreDeps): ToolRegistration {
 				}
 			}
 			const profile = await profileFor(deps, api, context);
-			const names = (await deps.toolsFor(session?.tenantId)).match(skill.tools);
+			const view = await deps.toolsFor(session?.tenantId);
+			const on = await deps.toolFilter?.(api.conversationId, session);
+			// A skill whose tools the tenant turned off still loads, without them.
+			const names = view.match(skill.tools).filter((name) => on === undefined || isOn(view, name, on));
 			const { added } = await api.commit(
 				(tx) => activateSkill(tx, api.conversationId, skill.name, names, policyOf(deps, profile)),
 				context,
@@ -285,7 +305,8 @@ function searchToolsTool(deps: CoreDeps): ToolRegistration {
 		replay: "safe",
 		execute: async (args, api, context) => {
 			const session = await readSession(api, api.conversationId, context);
-			const hits = (await deps.toolsFor(session?.tenantId)).search(args.query, args.limit ?? 5);
+			const on = await deps.toolFilter?.(api.conversationId, session);
+			const hits = (await deps.toolsFor(session?.tenantId)).search(args.query, args.limit ?? 5, on);
 			if (hits.length === 0) return { output: [{ type: "text", text: "No tools matched. Try other words." }] };
 			const profile = await profileFor(deps, api, context);
 			const names = hits.map((hit) => hit.entry.name);
@@ -341,6 +362,14 @@ function expertTool(deps: CoreDeps): ToolRegistration {
 			);
 		},
 	});
+}
+
+/** What the model is told about a tool its tenant turned off, so it can tell the person. */
+export const TURNED_OFF = "Your organization turned this tool off for this agent.";
+
+function isOn(view: CatalogView, name: string, on: (entry: CatalogEntry) => boolean): boolean {
+	const entry = view.get(name);
+	return entry === undefined || on(entry);
 }
 
 function policyOf(deps: CoreDeps, profile: Profile) {

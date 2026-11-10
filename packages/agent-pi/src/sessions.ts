@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import type { Context } from "@earendil-works/chord";
-import { AgentDoc, type Conversation, type ConversationId, type Harness, type JsonObject, ProviderDoc } from "@earendil-works/pi-durable";
+import { AgentDoc, type Conversation, type ConversationId, type Harness, type JsonObject, type ModelRef, ProviderDoc } from "@earendil-works/pi-durable";
 import { InstanceDoc, SessionDoc, type SessionState, ToolStateDoc, UserSessionsDoc } from "./agent/docs.ts";
 import type { Profile } from "./agent/profiles.ts";
 import { TasksDoc } from "./agent/tasks.ts";
@@ -116,6 +116,8 @@ export class SessionStore {
 		context: Context,
 		transient = false,
 		requestKey?: string,
+		/** The tenant's model for this session, in place of its profile's. */
+		model?: ModelRef,
 	): Promise<{ readonly conversation: Conversation; readonly sessionId: string; readonly existing: boolean }> {
 		const owner = ownerKey(principal);
 		// A repeat of a create answers the session the first one made, so a timer that fires twice makes one conversation.
@@ -129,7 +131,7 @@ export class SessionStore {
 			conversation = await this.#harness.createConversation(
 				{
 					ownership: { kind: "ownerless" },
-					agent: { model: profile.model, thinkingLevel: profile.thinkingLevel },
+					agent: { model: model ?? profile.model, thinkingLevel: profile.thinkingLevel },
 					init: async (tx, id) => {
 						// A transient session lives for one call. Its owner never lists it, and a crash leaves it out of their way.
 						if (!transient) {

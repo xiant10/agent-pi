@@ -242,7 +242,12 @@ async function dispatch(
 		case "skills.tools":
 			return {
 				result: {
-					tools: (await service.tools(principal)).map((entry) => ({ name: entry.name, server: entry.server, tool: entry.mcpName, description: entry.description })),
+					// owner is how a tenant's tool lists and policy name the tool: the module that owns it, or else its server or
+					// connector. The harness's own tools have none.
+					tools: (await service.tools(principal)).map((entry) => {
+						const owner = service.toolOwner(entry);
+						return { name: entry.name, server: entry.server, tool: entry.mcpName, description: entry.description, ...(owner === undefined ? {} : { owner }) };
+					}),
 				},
 			};
 		case "skills.checkFlow": {
