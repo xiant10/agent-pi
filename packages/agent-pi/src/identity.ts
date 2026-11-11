@@ -30,6 +30,11 @@ export type CallIdentity = {
 	readonly userId?: string;
 	readonly userName?: string;
 	readonly tenantId?: string;
+	/**
+	 * The run's delegated token, when it is good at the model gateway, so the gateway reads the tenant from it rather
+	 * than trusting `tenantId`. Never sent to a provider called directly: only the `"gateway"` header names include it.
+	 */
+	readonly runToken?: string;
 };
 
 /** What a header resolver sees: the identity, plus what only the session knows. */
@@ -62,7 +67,21 @@ export const GATEWAY_IDENTITY_HEADERS: IdentityHeaderNames = {
 	userId: "X-User-Id",
 	userName: "X-User-Name",
 	tenantId: "X-Tenant-ID",
+	runToken: "X-Run-Token",
 };
+
+/** The model gateway's audience. A run's token goes with a model call only when it names this. */
+export const MODEL_AUDIENCE = "ai-gateway-llm";
+
+/** Whether a token is for the model gateway. It reads the claims without checking them: the gateway does that. */
+export function forModelGateway(token: string): boolean {
+	try {
+		const claims = JSON.parse(Buffer.from(token.split(".")[1] ?? "", "base64url").toString("utf8")) as { aud?: string | string[] };
+		return claims.aud === MODEL_AUDIENCE || (Array.isArray(claims.aud) && claims.aud.includes(MODEL_AUDIENCE));
+	} catch {
+		return false;
+	}
+}
 
 /** `_meta` keys of a `tools/call` between agents. */
 export const TURN_META = "agent-pi/turnId";
@@ -350,6 +369,7 @@ export function identityExtension(
 	agent: string,
 	publicId: (conversationId: ConversationId) => string,
 	credentials: CredentialStore,
+	runToken?: (conversationId: ConversationId) => Promise<string>,
 ): Extension {
 	return defineExtension({
 		name: "core.identity",
@@ -364,6 +384,7 @@ export function identityExtension(
 					if (provider === undefined) return undefined;
 					const principal = credentials.get(api.conversationId);
 					const turn = await workTurn(api, api.conversationId, session, context);
+					const token = runToken === undefined ? undefined : await modelToken(runToken, api.conversationId);
 					registry.set(provider.sessionId, {
 						agent,
 						sessionId: publicId(owner),
@@ -374,10 +395,24 @@ export function identityExtension(
 						...(session.tenantId === undefined ? {} : { tenantId: session.tenantId }),
 						...(session.metadata === undefined ? {} : { metadata: session.metadata }),
 						...(principal === undefined ? {} : { principal }),
+						...(token === undefined ? {} : { runToken: token }),
 					});
 					return undefined;
 				},
 			}),
 		],
 	});
+}
+
+/**
+ * The run's token for a model call, or none: a conversation with no grant, a grant that doesn't list the model gateway,
+ * or an auth outage. The gateway then trusts the tenant header as before, unless it requires a token.
+ */
+async function modelToken(runToken: (conversationId: ConversationId) => Promise<string>, conversationId: ConversationId): Promise<string | undefined> {
+	try {
+		const token = await runToken(conversationId);
+		return forModelGateway(token) ? token : undefined;
+	} catch {
+		return undefined;
+	}
 }
