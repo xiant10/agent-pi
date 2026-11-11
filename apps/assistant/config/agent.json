@@ -64,10 +64,14 @@
 			"expert": { "model": "smart", "thinkingLevel": "${EXPERT_THINKING:-high}" }
 		}
 	},
-	"instructions": [{ "name": "base", "file": "../prompts/base.md", "tag": false }],
+	"instructions": [
+		{ "name": "base", "file": "../prompts/base.md", "tag": false },
+		{ "name": "organization", "slot": true }
+	],
 	"skillsDir": "../skills",
 	"tenantSkills": { "url": "${AGENT_CONTROL_URL:-}" },
 	"tenantConnectors": { "gatewayUrl": "${TOOL_GATEWAY_URL:-}" },
+	"tenantConfig": { "url": "${AGENT_TENANT_CONFIG_URL:-}" },
 	"plugins": [
 		{ "use": "guardrails" },
 		{ "use": "shortcuts", "options": { "faqFile": "../content/faq.json", "assistantName": "Ava" } },

@@ -292,6 +292,15 @@ agent-pi holds no connector IDs. `skills.tools` then returns the shared catalog 
 from control. See [`t10-agent-control/docs/tenant-connectors.md`](../../t10-agent-control/docs/tenant-connectors.md),
 "Control, gateway and harness".
 
+**A tenant's customization.** Built: `TenantConfigs` (`src/tenant-config.ts`) reads `GET /v1/runtime/config` per
+tenant and principal, and `TurnPins` holds it with the turn's skills. agent-ti cuts tools when it builds each request;
+pi-durable has no hook for that, because `pi.agent.tools` is the exact offered set and `beforeRequest` only changes
+messages. So the cut happens where that set changes: session creation, preloading, `search_tools` and `load_skill` use
+a view without the tools turned off, and admitting a turn withdraws any offered tool the pinned version turns off, in
+one commit. Withdrawing changes the prompt only when the tenant's choice did. A `beforeTool` hook refuses a call that
+gets past this, such as a stale call, and the flow runner checks the same filter. See
+[`t10-agent-control/docs/tenant-agents.md`](../../t10-agent-control/docs/tenant-agents.md), "In the harness".
+
 ## R7: speed and reasoning
 
 Speed, in order of impact:

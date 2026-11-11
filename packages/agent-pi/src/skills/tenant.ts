@@ -1,6 +1,7 @@
 import type { ConversationId } from "@earendil-works/pi-durable";
 import { synthesizeSkillFlow, validateSkillFlow } from "../flow/engine.ts";
 import type { SkillFlow } from "../flow/types.ts";
+import { skillOn, type TenantConfig } from "../tenant-config.ts";
 import { SILENT_LOGGER, type Logger } from "../util/log.ts";
 import { type Skill, toolAllowedBySkill } from "./skills.ts";
 
@@ -311,15 +312,15 @@ export class TenantSkills {
 export type SessionSkills = (conversationId: ConversationId, tenantId: string | undefined, parent?: number) => Promise<readonly Skill[]>;
 
 /**
- * Pins the skills each conversation's turn started with, so a publish during a turn reaches the next one, not the
- * rest of this one. Kept in memory for the most recent conversations; one that has been forgotten, or that a restart
- * resumes, reads the tenant's current skills.
+ * Pins the skills each conversation's turn started with, and the tenant's customization, so a publish during a turn
+ * reaches the next one, not the rest of this one. Kept in memory for the most recent conversations; one that has been
+ * forgotten, or that a restart resumes, reads the tenant's current ones.
  */
 export class TurnPins {
 	readonly #skillsFor: SkillsFor;
 	readonly #withDraft: DraftSkills | undefined;
 	readonly #max: number;
-	readonly #pins = new Map<number, readonly Skill[]>();
+	readonly #pins = new Map<number, { readonly skills: readonly Skill[]; readonly config?: TenantConfig }>();
 
 	constructor(skillsFor: SkillsFor, options: { readonly max?: number; readonly withDraft?: DraftSkills } = {}) {
 		this.#skillsFor = skillsFor;
@@ -330,20 +331,28 @@ export class TurnPins {
 	/**
 	 * A turn starts: read the tenant's skills and keep them for this conversation until its next turn. A test
 	 * conversation names a draft, whose author is always the conversation's owner, so nobody tests another's draft.
+	 * The skills `config` turns off are left out.
 	 */
 	readonly start = async (
 		conversationId: ConversationId,
 		tenantId: string | undefined,
 		draft?: { readonly author: string; readonly name: string },
+		config?: TenantConfig,
 	): Promise<readonly Skill[]> => {
-		const skills =
+		const read =
 			draft === undefined || this.#withDraft === undefined ? await this.#skillsFor(tenantId) : await this.#withDraft(tenantId, draft.author, draft.name);
+		const skills = config === undefined || config.skillsOff.length === 0 ? read : read.filter((skill) => skillOn(config, skill.name));
 		this.#pins.delete(conversationId);
-		this.#pins.set(conversationId, skills);
+		this.#pins.set(conversationId, { skills, ...(config === undefined ? {} : { config }) });
 		if (this.#pins.size > this.#max) this.#pins.delete(this.#pins.keys().next().value!);
 		return skills;
 	};
 
 	readonly of: SessionSkills = (conversationId, tenantId, parent) =>
-		Promise.resolve(this.#pins.get(conversationId) ?? (parent === undefined ? undefined : this.#pins.get(parent)) ?? this.#skillsFor(tenantId));
+		Promise.resolve(this.#pins.get(conversationId)?.skills ?? (parent === undefined ? undefined : this.#pins.get(parent)?.skills) ?? this.#skillsFor(tenantId));
+
+	/** The customization a conversation's turn pinned, or a child's parent's turn; `undefined` when none is held. */
+	config(conversationId: ConversationId, parent?: number): TenantConfig | undefined {
+		return this.#pins.get(conversationId)?.config ?? (parent === undefined ? undefined : this.#pins.get(parent)?.config);
+	}
 }

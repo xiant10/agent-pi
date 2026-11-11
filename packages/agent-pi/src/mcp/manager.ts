@@ -406,12 +406,14 @@ export class McpManager {
 
 function toEntry(server: string, prefix: string, tool: McpTool, maxDescription: number): CatalogEntry {
 	const description = (tool.description ?? tool.title ?? tool.name).trim();
+	const owner = tool._meta?.["t10/module"];
 	return {
 		name: offeredName(prefix, tool.name),
 		server,
 		mcpName: tool.name,
 		description: description.length > maxDescription ? `${description.slice(0, maxDescription - 3)}...` : description,
 		inputSchema: tool.inputSchema as Record<string, unknown>,
+		...(typeof owner === "string" && owner !== "" ? { owner } : {}),
 	};
 }
 

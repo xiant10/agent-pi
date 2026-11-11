@@ -256,6 +256,18 @@ The prompt lists only names and descriptions. `load_skill` returns the instructi
 
 With `tenantSkills.url` (`AGENT_CONTROL_URL` in the bundled apps) and `grants`, each tenant also sees its published overrides of these skills' workflows and skills of its own, read from `t10-agent-control` as this runtime's service account when a turn needs them and kept 10 seconds, or until its change feed names the tenant. A session created with `metadata.skillDraft` is a skill editor's test: its turns use the owner's draft of that skill. Each turn pins the skills it started with, and a custom skill's reference files are read from memory with `load_skill` and `file`. The skill index, `load_skill`, preloading, the flow runner and `skills.list` all use the session's tenant's view. Nothing is written to disk. See `t10-agent-control/docs/tenant-skills.md`.
 
+## A tenant's customization
+
+With `tenantConfig.url` and `grants`, each tenant's customization of this agent is read from `t10-agent-control` (`GET /v1/runtime/config`, by tenant and the session owner as principal) as skills are, kept 10 seconds or until the change feed names the tenant, and pinned with the skills for each turn; a child session uses its parent's. When control can't be reached, the last good copy stays with no time limit; one never read since startup runs the agent as shipped.
+
+- **Instructions.** The tenant's text goes at the instruction marked `"slot": true`, which has no file, or after the agent's own instructions when there's none, under an `<organization>` heading that says the instructions above it win. A profile with `speech` gets the short call text instead.
+- **Tools.** A tenant's lists name a tool by its owner, `owner:tool`, as the tool gateway does: the module in a tool's `_meta["t10/module"]`, else its server or connector. Plugins' in-process tools and sub-agents have no owner and are never cut. A session's offered tools, `alwaysOnTools`, preloading, `search_tools`, `load_skill` and the flow runner leave out what the turn's version turns off, and a call to such a tool is refused. A tool turned off after a session offered it is withdrawn at that session's next turn; turned back on, it's offered again once a skill or search turns it on. `tenantConfig.keepTools` are tools no tenant turns off. The gateway enforces the lists too, so this is the working boundary, not the security one.
+- **Skills.** Skills the version turns off leave the index, `load_skill`, preloading, `skills.list` and `skills.get`.
+- **Model.** A new session on a profile without `speech` uses the tenant's model entry, when this agent has it, in place of its profile's, and keeps it.
+- **Test chats.** A session created with `metadata.configDraft: true` uses its owner's draft, read fresh each turn.
+
+`GET /v1/runtime` then reports `tenant_config` in `capabilities`, and every runtime reports its model entries in `models`. `skills.tools` gives each tool's `owner`. See `t10-agent-control/docs/tenant-agents.md`.
+
 ## Extending auth
 
 ```ts

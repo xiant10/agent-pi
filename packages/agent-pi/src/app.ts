@@ -10,18 +10,19 @@ import {
 	defineExtension,
 	Harness,
 	type HarnessSettings,
+	type ConversationId,
 	type ModelRef,
 	MemoryStorage,
 	type Storage,
 } from "@earendil-works/pi-durable";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { toLlmContent } from "@earendil-works/pi-mcp";
-import { coreExtension, instructionsExtension } from "./agent/core-extension.ts";
+import { coreExtension, instructionsExtension, TURNED_OFF } from "./agent/core-extension.ts";
 import { createConfiguredModels } from "./agent/models.ts";
 import type { Profile } from "./agent/profiles.ts";
 import { ChildSlots, SUBAGENT_PARAMETERS, SUBAGENT_SERVER, type Subagent, subagentToolName } from "./agent/subagents.ts";
 import { parkedTasks } from "./agent/parked.ts";
-import { readSession } from "./agent/docs.ts";
+import { readSession, type SessionState } from "./agent/docs.ts";
 import { AuthError, type Authenticator, withExtension } from "./auth/authenticator.ts";
 import { CredentialStore } from "./auth/credentials.ts";
 import { GrantBroker, type GrantBrokerOptions } from "./auth/grants.ts";
@@ -40,6 +41,7 @@ import { AgentService } from "./service.ts";
 import { resolveInstance, SessionStore } from "./sessions.ts";
 import { discoverSkills, type Skill } from "./skills/skills.ts";
 import { type SkillsFor, TenantSkills, TurnPins } from "./skills/tenant.ts";
+import { configAllows, type TenantConfig, TenantConfigs, tenantSection } from "./tenant-config.ts";
 import { type CatalogEntry, type CatalogView, ToolCatalog } from "./tools/catalog.ts";
 import {
 	isTenantExtension,
@@ -132,6 +134,13 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 	container.value(Services.skillsFor, skillsFor);
 	const pins = new TurnPins(skillsFor, tenantSkills === undefined ? {} : { withDraft: tenantSkills.withDraft });
 	container.value(Services.sessionSkills, pins.of);
+	// A tenant's customization of this agent, read like its skills and pinned with them for each turn.
+	const configs =
+		config.tenantConfig === undefined || grants === undefined
+			? undefined
+			: new TenantConfigs({ url: config.tenantConfig.url, keepTools: config.tenantConfig.keepTools, token: () => grants.serviceToken(), log });
+	// Control's change feed is the skills'; a row wakes the tenant's customization too.
+	if (configs !== undefined) tenantSkills?.listeners.add((tenant) => configs.changed(tenant));
 	for (const server of mcpServers) {
 		if (server.transport === "http" && server.auth === "grant" && grants === undefined) {
 			throw new Error(`MCP server ${server.name} has auth: "grant", which needs a grants section`);
@@ -164,6 +173,18 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 				});
 	if (connectors !== undefined) tenantSkills?.listeners.add((tenant) => connectors.changed(tenant));
 	const toolsFor = async (tenantId: string | undefined): Promise<CatalogView> => (connectors === undefined ? catalog : (await connectors.forTenant(tenantId)).catalog);
+	// Who owns a tool as the tool gateway names it, which a tenant's lists match: its module, else its server or
+	// connector. Plugins' in-process tools and sub-agents are the harness's own, which no list reaches.
+	const ownerOf = (entry: CatalogEntry): string | undefined =>
+		pluginServers.has(entry.server) || entry.server === SUBAGENT_SERVER ? undefined : (entry.owner ?? entry.server);
+	const toolOn = (tenantConfig: TenantConfig) => (entry: CatalogEntry) => configAllows(tenantConfig, ownerOf(entry), entry.mcpName);
+	// The customization a session's turn uses: the one its turn pinned, a child's parent's, or else a fresh read.
+	const sessionConfig = async (conversationId: ConversationId, session: Readonly<SessionState> | undefined): Promise<TenantConfig | undefined> =>
+		configs === undefined ? undefined : (pins.config(conversationId, session?.parent) ?? (await configs.forPrincipal(session?.tenantId, session?.userId ?? "")));
+	const toolFilter = async (conversationId: ConversationId, session: Readonly<SessionState> | undefined) => {
+		const pinned = await sessionConfig(conversationId, session);
+		return pinned === undefined ? undefined : toolOn(pinned);
+	};
 
 	// Extension order is prompt order: configured instructions, plugin sections, then the skill index and profile.
 	let closing = false;
@@ -171,7 +192,18 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 	const identity = await container.get(Services.identity);
 	const subagents = buildSubagents(config, (await container.get(Services.models)).refs);
 	const runs = new RunTracker();
-	registry.install(instructionsExtension(config.instructions));
+	registry.install(
+		instructionsExtension(
+			config.instructions,
+			configs === undefined
+				? undefined
+				: async (input, sectionContext) => {
+						const session = await readSession(input.read, input.conversationId, sectionContext);
+						const pinned = await sessionConfig(input.conversationId, session);
+						return pinned === undefined ? undefined : tenantSection(pinned, profileOf(session?.profile).speech);
+					},
+		),
+	);
 	for (const extension of plugins.extensions(profileOf, credentials)) registry.install(extension);
 	registry.install(
 		coreExtension({
@@ -190,6 +222,7 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 			harness: () => harness,
 			woken: (conversationId, session, submission, turnId) => service.woken(conversationId, session, submission, turnId),
 			stopping: () => closing || failed,
+			...(configs === undefined ? {} : { toolFilter }),
 			...(grants === undefined ? {} : { grants }),
 			callCatalogTool: async (api, toolContext, toolName, toolArgs) => {
 				const session = await readSession(api, api.conversationId, toolContext);
@@ -201,6 +234,8 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 				if (!mcp.allowsTenant(entry, session?.tenantId)) {
 					return { output: "This tool isn't available to this tenant.", isError: true };
 				}
+				const on = await toolFilter(api.conversationId, session);
+				if (on !== undefined && !on(entry)) return { output: TURNED_OFF, isError: true };
 				const caller =
 					grants === undefined
 						? undefined
@@ -323,6 +358,8 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 		skills,
 		skillsFor,
 		pins,
+		...(configs === undefined ? {} : { configs: { source: configs, toolOn, model: (name: string) => refs.get(name) } }),
+		ownerOf,
 		toolAllowed: (entry, tenantId) => mcp.allowsTenant(entry, tenantId),
 		profiles,
 		defaultProfile,
@@ -366,7 +403,9 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 			agent: config.agent,
 			bundle: config.bundle,
 			profiles: Object.keys(config.profiles),
-			capabilities,
+			capabilities: configs === undefined ? capabilities : [...capabilities, "tenant_config"],
+			// The model entries a tenant may pick among, which t10-agent-control checks against what it allows.
+			models: Object.keys(config.models),
 			methods: plugins.rpcMethods,
 		}),
 		readiness: () => ({ ready: !closing && !failed, detail: { agent: config.agent, instanceId, tools: catalog.size, mcp: mcp.status() } }),
