@@ -1,10 +1,14 @@
+import { mkdtempSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { Principal } from "../src/auth/authenticator.ts";
 import type { GrantsConfig } from "../src/auth/grants.ts";
 import type { ConversationId } from "@earendil-works/pi-durable";
 import { applyTenantSkills, readSkillFile, type Skill, type SkillFlow, type TenantSkillRecord, TenantSkills, TurnPins } from "../src/index.ts";
+import { ControlCopies } from "../src/util/control-copy.ts";
 import { fauxAssistantMessage, fauxText, fauxToolCall, rpc, rpcStream, startTestAgent, type TestAgent } from "../src/testing.ts";
 
 const flow = (title: string, tool?: string): SkillFlow => ({
@@ -167,8 +171,31 @@ describe("TenantSkills", () => {
 		expect((await source.forTenant("acme"))[0]?.flow?.title).toBe("Acme weather v2");
 		expect(fake.calls).toHaveLength(calls);
 
-		now += 300_000;
-		expect(await source.forTenant("acme")).toEqual([weather]);
+		// The last good answer stands in with no time limit: an older copy of the tenant's choice beats the built-in.
+		now += 3_600_000;
+		expect((await source.forTenant("acme"))[0]?.flow?.title).toBe("Acme weather v2");
+		// A tenant control never answered for gets the built-in skills.
+		expect(await source.forTenant("initech")).toEqual([weather]);
+	});
+
+	it("starts from the copy on disk after a restart while control is down", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "control-copy-"));
+		const answers: Record<string, TenantSkillRecord[]> = { acme: [override("Acme weather")] };
+		const fake = control(answers);
+		const options = { url: "http://control/", token: async () => "service-token", fetch: fake.fetch };
+		const before = new TenantSkills([weather], { ...options, copies: new ControlCopies(dir, "skills") });
+		expect((await before.forTenant("acme"))[0]?.flow?.title).toBe("Acme weather");
+
+		fake.setDown(true);
+		const after = new TenantSkills([weather], { ...options, copies: new ControlCopies(dir, "skills") });
+		expect((await after.forTenant("acme"))[0]?.flow?.title).toBe("Acme weather");
+		expect(await after.forTenant("globex")).toEqual([weather]);
+
+		// Back up, the first check is conditional on the saved copy, so nothing changed costs a 304.
+		fake.setDown(false);
+		const again = new TenantSkills([weather], { ...options, copies: new ControlCopies(dir, "skills") });
+		expect((await again.forTenant("acme"))[0]?.flow?.title).toBe("Acme weather");
+		expect(fake.calls.at(-1)?.etag).not.toBeNull();
 	});
 
 	it("rereads a tenant the change feed names, before its cache would turn over", async () => {

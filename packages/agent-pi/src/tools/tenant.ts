@@ -1,3 +1,4 @@
+import { ControlCopies } from "../util/control-copy.ts";
 import { SILENT_LOGGER, type Logger } from "../util/log.ts";
 import { type CatalogEntry, offeredName, ScopedCatalog, type ToolCatalog } from "./catalog.ts";
 
@@ -37,8 +38,9 @@ export type TenantConnectorsOptions = {
 	readonly now?: () => number;
 	readonly log?: Logger;
 	readonly freshMs?: number;
-	readonly staleMs?: number;
 	readonly timeoutMs?: number;
+	/** Where each tenant's last good answer is kept, so a restart while control is down starts from it. */
+	readonly copies?: ControlCopies;
 };
 
 type Entry = { readonly etag?: string; readonly tools: TenantTools; readonly okAt: number; readonly checkedAt: number };
@@ -68,8 +70,9 @@ export function tenantTools(base: ToolCatalog, records: readonly TenantConnector
 }
 
 /**
- * Each tenant's connector tools, read from control and kept for a few seconds, like `TenantSkills`. A tenant without
- * connectors costs a 304 every `freshMs` while it's in use, and nothing otherwise.
+ * Each tenant's connector tools, read from control and kept for a few seconds, like `TenantSkills`, with the last good
+ * answer kept on disk and standing in with no time limit. A tenant without connectors costs a 304 every `freshMs` while
+ * it's in use, and nothing otherwise.
  */
 export class TenantConnectors {
 	readonly #base: ToolCatalog;
@@ -80,8 +83,8 @@ export class TenantConnectors {
 	readonly #now: () => number;
 	readonly #log: Logger;
 	readonly #freshMs: number;
-	readonly #staleMs: number;
 	readonly #timeoutMs: number;
+	readonly #copies: ControlCopies;
 	readonly #empty: TenantTools;
 	readonly #entries = new Map<string, Entry>();
 	readonly #checking = new Map<string, Promise<TenantTools>>();
@@ -96,15 +99,15 @@ export class TenantConnectors {
 		this.#now = options.now ?? Date.now;
 		this.#log = options.log ?? SILENT_LOGGER;
 		this.#freshMs = options.freshMs ?? 10_000;
-		this.#staleMs = options.staleMs ?? 300_000;
 		this.#timeoutMs = options.timeoutMs ?? 2_000;
+		this.#copies = options.copies ?? new ControlCopies(undefined, "connectors", this.#log);
 		this.#empty = tenantTools(base, []);
 	}
 
 	/** A tenant's tools. A session without a tenant has none of its own. */
 	readonly forTenant = (tenantId: string | undefined): Promise<TenantTools> => {
 		if (tenantId === undefined || tenantId.length === 0) return Promise.resolve(this.#empty);
-		const entry = this.#entries.get(tenantId);
+		const entry = this.#entries.get(tenantId) ?? this.#saved(tenantId);
 		if (entry !== undefined && this.#now() - entry.checkedAt < this.#freshMs) return Promise.resolve(entry.tools);
 		const inFlight = this.#checking.get(tenantId);
 		if (inFlight !== undefined) return inFlight;
@@ -143,17 +146,33 @@ export class TenantConnectors {
 			}
 			if (!response.ok) throw new Error(`status ${response.status}`);
 			const body = (await response.json()) as { connectors?: TenantConnectorRecord[] };
-			const tools = tenantTools(this.#base, Array.isArray(body.connectors) ? body.connectors : []);
+			const records = Array.isArray(body.connectors) ? body.connectors : [];
+			const tools = tenantTools(this.#base, records);
 			const etag = response.headers.get("etag") ?? undefined;
 			this.#set(tenant, entry, { ...(etag === undefined ? {} : { etag }), tools, okAt: now, checkedAt: checkedAt() });
+			this.#copies.save(tenant, { ...(etag === undefined ? {} : { etag }), at: now, body: { connectors: records } });
 			return tools;
 		} catch (error) {
-			const usable = entry !== undefined && entry.okAt > 0 && now - entry.okAt < this.#staleMs;
-			this.#log.warn("connectors.tenant_unavailable", { tenant, error: error instanceof Error ? error.message : String(error), using: usable ? "last answer" : "none" });
+			const usable = entry !== undefined && entry.okAt > 0;
+			this.#copies.failed(tenant, error, usable ? entry.okAt : 0, now, usable ? "last answer" : "none");
 			const tools = usable ? entry.tools : this.#empty;
 			this.#set(tenant, entry, { ...(usable && entry.etag !== undefined ? { etag: entry.etag } : {}), tools, okAt: usable ? entry.okAt : 0, checkedAt: now });
 			return tools;
 		}
+	}
+
+	/**
+	 * The copy on disk, the first time this process needs a tenant, installed as if control had just answered it: its
+	 * ETag makes the first check a 304 if nothing changed.
+	 */
+	#saved(tenant: string): Entry | undefined {
+		const saved = this.#copies.load(tenant);
+		if (saved === undefined) return undefined;
+		const body = saved.body as { connectors?: TenantConnectorRecord[] };
+		const tools = tenantTools(this.#base, Array.isArray(body?.connectors) ? body.connectors : []);
+		const entry: Entry = { ...(saved.etag === undefined ? {} : { etag: saved.etag }), tools, okAt: saved.at, checkedAt: 0 };
+		this.#set(tenant, undefined, entry);
+		return entry;
 	}
 
 	#set(tenant: string, before: Entry | undefined, after: Entry): void {

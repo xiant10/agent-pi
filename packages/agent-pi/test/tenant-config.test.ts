@@ -7,6 +7,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../src/config.ts";
+import { ControlCopies } from "../src/util/control-copy.ts";
 import { configAllows, readTenantConfig, type Skill, TenantConfigs, tenantSection } from "../src/index.ts";
 import { fakeMcpServer, fauxAssistantMessage, fauxText, fauxToolCall, recording, rpc, rpcStream, startTestAgent, type TestAgent } from "../src/testing.ts";
 
@@ -81,6 +82,16 @@ describe("a tenant's customization", () => {
 		expect((await configs.forPrincipal("acme", "ada")).instructions).toBe("v2");
 		// Never read since the start: the agent as shipped.
 		expect(await configs.forPrincipal("globex", "ada")).toBe(configs.shipped);
+
+		// A replica that restarts during the outage starts from its copy on disk; with none, it would run as shipped.
+		const dir = mkdtempSync(join(tmpdir(), "control-copy-"));
+		down = false;
+		const options = { url: "http://control/", keepTools: [], token: async () => "service-token", fetch, now: () => now };
+		expect((await new TenantConfigs({ ...options, copies: new ControlCopies(dir, "config") }).forPrincipal("acme", "ada")).instructions).toBe("v2");
+		down = true;
+		const restarted = new TenantConfigs({ ...options, copies: new ControlCopies(dir, "config") });
+		expect((await restarted.forPrincipal("acme", "ada")).instructions).toBe("v2");
+		expect(await restarted.forPrincipal("acme", "bob")).toBe(restarted.shipped);
 	});
 });
 
