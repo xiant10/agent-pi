@@ -530,7 +530,7 @@ function parseIdentityHeaders(r: Reader, value: unknown, at: string): IdentityHe
 	return names;
 }
 
-const IDENTITY_FIELDS: readonly string[] = ["agent", "sessionId", "turnId", "userId", "userName", "tenantId"];
+const IDENTITY_FIELDS: readonly string[] = ["agent", "sessionId", "turnId", "userId", "userName", "tenantId", "runToken"];
 
 function parseMcpEndpoint(r: Reader, value: unknown): McpEndpointConfig {
 	const at = "mcpEndpoint";

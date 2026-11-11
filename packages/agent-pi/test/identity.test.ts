@@ -3,7 +3,7 @@ import type { AddressInfo } from "node:net";
 import { MemoryStorage } from "@earendil-works/pi-durable";
 import { afterEach, describe, expect, it } from "vitest";
 import { type RunningAgent, startAgent } from "../src/app.ts";
-import { GATEWAY_IDENTITY_HEADERS, type IdentityHeaderNames } from "../src/identity.ts";
+import { forModelGateway, GATEWAY_IDENTITY_HEADERS, type IdentityHeaderNames, IdentityRegistry, withIdentityHeaders } from "../src/identity.ts";
 import { StaticTokenAuthenticator } from "../src/auth/static-token.ts";
 import { Services } from "../src/plugins/services.ts";
 import { type AgentPlugin, definePlugin, type RunContext } from "../src/plugins/types.ts";
@@ -88,6 +88,8 @@ describe("identity headers", () => {
 			"x-user-id": "alice",
 			"x-user-name": encodeURIComponent("Alice 李"),
 		});
+		// No grant, so no run token: the gateway trusts the tenant header, as before.
+		expect(seen[0]!["x-run-token"]).toBeUndefined();
 		expect(seen[1]!["x-turn-id"]).toBe(second.body.result!.turnId);
 		await waitFor(() => runs.length === 2);
 		expect(runs.map((run) => run.turnId)).toEqual([turnId, second.body.result!.turnId]);
@@ -169,5 +171,33 @@ describe("identity headers", () => {
 		);
 		expect(answers.map((answer) => answer.body.result!.turnId)).toEqual(["concurrent-0", "concurrent-1", "concurrent-2"]);
 		expect(seen.map((headers) => headers["x-turn-id"]).sort()).toEqual(["concurrent-0", "concurrent-1", "concurrent-2"]);
+	});
+});
+
+describe("run tokens on model calls", () => {
+	const token = (aud: string | string[]) => `e30.${Buffer.from(JSON.stringify({ aud })).toString("base64url")}.sig`;
+
+	it("goes only with a token the model gateway accepts", () => {
+		expect(forModelGateway(token(["ai-gateway-tools", "ai-gateway-llm"]))).toBe(true);
+		expect(forModelGateway(token("ai-gateway-llm"))).toBe(true);
+		expect(forModelGateway(token(["ai-gateway-tools"]))).toBe(false);
+		expect(forModelGateway("not a token")).toBe(false);
+	});
+
+	it("is a gateway header, and never sent where the headers are off", async () => {
+		const registry = new IdentityRegistry();
+		registry.set("p1", { sessionId: "s1", tenantId: "ten_acme", runToken: "run-token" });
+		const sent: (Record<string, string | null> | undefined)[] = [];
+		const streams = {
+			stream: (_model: unknown, _context: unknown, options?: { headers?: Record<string, string | null> }) => {
+				sent.push(options?.headers);
+				return undefined as never;
+			},
+			streamSimple: () => undefined as never,
+		} as unknown as Parameters<typeof withIdentityHeaders>[0];
+		withIdentityHeaders(streams, registry, GATEWAY_IDENTITY_HEADERS).stream({} as never, {} as never, { sessionId: "p1" });
+		withIdentityHeaders(streams, registry, { sessionId: "X-Session" }).stream({} as never, {} as never, { sessionId: "p1" });
+		expect(sent[0]).toMatchObject({ "X-Run-Token": "run-token", "X-Tenant-ID": "ten_acme" });
+		expect(sent[1]).toEqual({ "X-Session": "s1" });
 	});
 });

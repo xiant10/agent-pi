@@ -100,7 +100,7 @@ spec:
             - name: GRANT_ACTIONS
               value: agent:use,work:read,work:write,knowledge:read,property:read,property:propose
             - name: GRANT_AUDIENCES
-              value: agent-pi,t10-collab,t10-knowledge,t10-property,ai-gateway-tools
+              value: agent-pi,t10-collab,t10-knowledge,t10-property,ai-gateway-tools,ai-gateway-llm
             # Concurrency & capacity limits
             - name: MAX_RUNS
               value: "1500"

@@ -278,7 +278,15 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 			},
 		}),
 	);
-	registry.install(identityExtension(identity, config.agent, (id) => store.publicId(id), credentials));
+	registry.install(
+		identityExtension(
+			identity,
+			config.agent,
+			(id) => store.publicId(id),
+			credentials,
+			grants === undefined ? undefined : (id) => grants.token(id),
+		),
+	);
 	// A server's tools enter the registry as one extension, replaced in place when the server re-lists its tools.
 	// Plugins' in-process tools are catalogued too, so skills and search find them, but their extension holds the code.
 	catalog.onChange((server) => {
