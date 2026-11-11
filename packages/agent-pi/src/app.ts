@@ -1,7 +1,7 @@
 import { mkdirSync } from "node:fs";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import {
@@ -57,6 +57,7 @@ import { capabilitiesOf, runtimeManifest } from "./runtime.ts";
 import { createHttpServer } from "./transport/http.ts";
 import { McpEndpoint } from "./transport/mcp.ts";
 import { CORE_METHODS } from "./transport/streamable-http.ts";
+import { ControlCopies } from "./util/control-copy.ts";
 import { createLogger, type Logger } from "./util/log.ts";
 
 /** A session's caller credentials are dropped after this long without a request, unless it is working. */
@@ -125,11 +126,15 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 	const credentials = new CredentialStore();
 	const mcpServers = [...config.mcpServers, ...plugins.mcpServers];
 	const grants = config.grants === undefined ? undefined : new GrantBroker(config.grants, options.grantOptions);
-	// Tenant skills are read from the control plane when a turn needs them; nothing is copied into this process.
+	// What control last answered for each tenant is kept beside the store, so a replica that restarts while control is
+	// down starts from it. A memory store keeps nothing on disk, and nor does this.
+	const controlDir = config.storage.kind === "sqlite" ? join(dirname(config.storage.path), "control") : undefined;
+	const copies = (feed: string) => new ControlCopies(controlDir, feed, log);
+	// Tenant skills are read from the control plane when a turn needs them, and only a copy of the last answer is kept.
 	const tenantSkills =
 		config.tenantSkills === undefined || grants === undefined
 			? undefined
-			: new TenantSkills(skills, { url: config.tenantSkills.url, token: () => grants.serviceToken(), log });
+			: new TenantSkills(skills, { url: config.tenantSkills.url, token: () => grants.serviceToken(), log, copies: copies("skills") });
 	const skillsFor: SkillsFor = tenantSkills?.forTenant ?? (async () => skills);
 	container.value(Services.skillsFor, skillsFor);
 	const pins = new TurnPins(skillsFor, tenantSkills === undefined ? {} : { withDraft: tenantSkills.withDraft });
@@ -138,7 +143,13 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 	const configs =
 		config.tenantConfig === undefined || grants === undefined
 			? undefined
-			: new TenantConfigs({ url: config.tenantConfig.url, keepTools: config.tenantConfig.keepTools, token: () => grants.serviceToken(), log });
+			: new TenantConfigs({
+					url: config.tenantConfig.url,
+					keepTools: config.tenantConfig.keepTools,
+					token: () => grants.serviceToken(),
+					log,
+					copies: copies("config"),
+				});
 	// Control's change feed is the skills'; a row wakes the tenant's customization too.
 	if (configs !== undefined) tenantSkills?.listeners.add((tenant) => configs.changed(tenant));
 	for (const server of mcpServers) {
@@ -165,6 +176,7 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 					url: config.tenantSkills.url,
 					token: () => grants.serviceToken(),
 					log,
+					copies: copies("connectors"),
 					changed: (tenantId, tools) => {
 						if (tools.catalog.own().length === 0) registry.uninstall(defineExtension({ name: tenantExtensionName(tenantId) }));
 						else registry.install(tenantExtension(tenantId, tools, mcp, grants, config.tenantConnectors!.gatewayUrl, (id) => store.publicId(id)));

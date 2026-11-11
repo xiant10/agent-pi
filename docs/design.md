@@ -285,7 +285,7 @@ refresh re-installs that extension in place. The meta-tools live in the `agent.c
 calls `<gatewayUrl>/mcp/connector/<id>`. Proposed, replacing it: the gateway serves a tenant's connectors as one MCP
 server, `/mcp/tenant`, and the assistant configures it as an `auth: "grant"` server with `perTenant: true`. Such a
 server isn't listed at startup; it's listed at the start of a turn with the turn's grant token, kept per tenant for 10
-seconds (5 minutes' fallback, ended early by the skills change feed), and its tools stay in the `tenant.<tenant>`
+seconds (the last answer kept with no time limit when the gateway is down, ended early by the skills change feed), and its tools stay in the `tenant.<tenant>`
 extension and a `ScopedCatalog`, so two tenants' `crm_get_account` never meet. Each tool's `_meta["t10/server"]` is
 its server name for skill patterns and search. Calls go over the run's grant connection like any grant server, and
 agent-pi holds no connector IDs. `skills.tools` then returns the shared catalog only; workbench adds connector tools

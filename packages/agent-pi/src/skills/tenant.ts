@@ -2,6 +2,7 @@ import type { ConversationId } from "@earendil-works/pi-durable";
 import { synthesizeSkillFlow, validateSkillFlow } from "../flow/engine.ts";
 import type { SkillFlow } from "../flow/types.ts";
 import { skillOn, type TenantConfig } from "../tenant-config.ts";
+import { ControlCopies } from "../util/control-copy.ts";
 import { SILENT_LOGGER, type Logger } from "../util/log.ts";
 import { type Skill, toolAllowedBySkill } from "./skills.ts";
 
@@ -136,10 +137,10 @@ export type TenantSkillsOptions = {
 	readonly log?: Logger;
 	/** How long an answer is used before it's checked again. Default 10 s. */
 	readonly freshMs?: number;
-	/** How long the last good answer stands in while control can't be reached. Default 5 min. */
-	readonly staleMs?: number;
 	/** How long a check may take on a turn's path. Default 2 s. */
 	readonly timeoutMs?: number;
+	/** Where each tenant's last good answer is kept, so a restart while control is down starts from it. */
+	readonly copies?: ControlCopies;
 };
 
 type Entry = {
@@ -154,7 +155,8 @@ type Entry = {
 
 /**
  * One tenant's skills, read from control and kept for a few seconds. A check after that is a 304 when nothing changed,
- * so a publish reaches every replica within `freshMs`, and nothing is ever written to this process's disk or store.
+ * so a publish reaches every replica within `freshMs`. The last good answer stands in while control can't be reached,
+ * with no time limit, and is kept on disk as a copy, never in the conversation store.
  */
 export class TenantSkills {
 	readonly #base: readonly Skill[];
@@ -164,8 +166,8 @@ export class TenantSkills {
 	readonly #now: () => number;
 	readonly #log: Logger;
 	readonly #freshMs: number;
-	readonly #staleMs: number;
 	readonly #timeoutMs: number;
+	readonly #copies: ControlCopies;
 	readonly #entries = new Map<string, Entry>();
 	readonly #checking = new Map<string, Promise<readonly Skill[]>>();
 	/** Bumped when control says a tenant changed, so a check already under way can't keep what it read as fresh. */
@@ -179,14 +181,14 @@ export class TenantSkills {
 		this.#now = options.now ?? Date.now;
 		this.#log = options.log ?? SILENT_LOGGER;
 		this.#freshMs = options.freshMs ?? 10_000;
-		this.#staleMs = options.staleMs ?? 300_000;
 		this.#timeoutMs = options.timeoutMs ?? 2_000;
+		this.#copies = options.copies ?? new ControlCopies(undefined, "skills", this.#log);
 	}
 
 	/** The skills a tenant sees. A session without a tenant sees the built-in ones. */
 	readonly forTenant: SkillsFor = (tenantId) => {
 		if (tenantId === undefined || tenantId.length === 0) return Promise.resolve(this.#base);
-		const entry = this.#entries.get(tenantId);
+		const entry = this.#entries.get(tenantId) ?? this.#saved(tenantId);
 		if (entry !== undefined && this.#now() - entry.checkedAt < this.#freshMs) return Promise.resolve(entry.view);
 		const inFlight = this.#checking.get(tenantId);
 		if (inFlight !== undefined) return inFlight;
@@ -295,16 +297,31 @@ export class TenantSkills {
 			});
 			const etag = response.headers.get("etag") ?? undefined;
 			this.#entries.set(tenant, { ...(etag === undefined ? {} : { etag }), view, records, okAt: now, checkedAt: checkedAt() });
+			this.#copies.save(tenant, { ...(etag === undefined ? {} : { etag }), at: now, body: { skills: records } });
 			return view;
 		} catch (error) {
 			// Checked again only after freshMs, so an outage costs one slow turn per tenant, not every one.
-			const usable = entry !== undefined && entry.okAt > 0 && now - entry.okAt < this.#staleMs;
-			this.#log.warn("skills.tenant_unavailable", { tenant, error: error instanceof Error ? error.message : String(error), using: usable ? "last answer" : "built-in skills" });
+			const usable = entry !== undefined && entry.okAt > 0;
+			this.#copies.failed(tenant, error, usable ? entry.okAt : 0, now, usable ? "last answer" : "built-in skills");
 			const view = usable ? entry.view : this.#base;
 			const records = usable ? entry.records : [];
 			this.#entries.set(tenant, { ...(usable && entry.etag !== undefined ? { etag: entry.etag } : {}), view, records, okAt: usable ? entry.okAt : 0, checkedAt: now });
 			return view;
 		}
+	}
+
+	/** The copy on disk, the first time this process needs a tenant. Its ETag makes the first check a 304 if nothing changed. */
+	#saved(tenant: string): Entry | undefined {
+		const saved = this.#copies.load(tenant);
+		if (saved === undefined) return undefined;
+		const body = saved.body as { skills?: TenantSkillRecord[] };
+		const records = Array.isArray(body?.skills) ? body.skills : [];
+		const view = records.length === 0 ? this.#base : applyTenantSkills(this.#base, records, (record, reason) => {
+			this.#log.warn("skills.tenant_skipped", { tenant, skill: record.name, version: record.version, reason });
+		});
+		const entry: Entry = { ...(saved.etag === undefined ? {} : { etag: saved.etag }), view, records, okAt: saved.at, checkedAt: 0 };
+		this.#entries.set(tenant, entry);
+		return entry;
 	}
 }
 

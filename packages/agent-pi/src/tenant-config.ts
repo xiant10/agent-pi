@@ -1,3 +1,4 @@
+import { ControlCopies } from "./util/control-copy.ts";
 import { SILENT_LOGGER, type Logger } from "./util/log.ts";
 
 /**
@@ -95,16 +96,20 @@ export type TenantConfigsOptions = {
 	readonly freshMs?: number;
 	/** How long a check may take on a turn's path. Default 2 s. */
 	readonly timeoutMs?: number;
+	/** Where each principal's last good answer is kept, so a restart while control is down starts from it. */
+	readonly copies?: ControlCopies;
 };
 
-type Entry = { readonly etag?: string; readonly config: TenantConfig; readonly checkedAt: number };
+/** `okAt` is when control last answered, or when the copy on disk was saved. */
+type Entry = { readonly etag?: string; readonly config: TenantConfig; readonly okAt: number; readonly checkedAt: number };
 
 const MAX_ENTRIES = 10_000;
 
 /**
  * Each tenant's customization, per principal, because a teammate's account reads its own. A read is fresh for
  * `freshMs`, and control's change feed (through `TenantSkills`) ends that early. When control can't be reached, the
- * last good copy stays, with no time limit, because an older copy of the tenant's choice is better than none. Tool
+ * last good copy stays, with no time limit, because an older copy of the tenant's choice is better than none, and it's
+ * kept on disk so a restart doesn't lose it. Tool
  * limits don't depend on it: the tool gateway enforces them.
  */
 export class TenantConfigs {
@@ -116,6 +121,7 @@ export class TenantConfigs {
 	readonly #log: Logger;
 	readonly #freshMs: number;
 	readonly #timeoutMs: number;
+	readonly #copies: ControlCopies;
 	readonly #entries = new Map<string, Entry>();
 	readonly #checking = new Map<string, Promise<TenantConfig>>();
 	readonly shipped: TenantConfig;
@@ -129,6 +135,7 @@ export class TenantConfigs {
 		this.#log = options.log ?? SILENT_LOGGER;
 		this.#freshMs = options.freshMs ?? 10_000;
 		this.#timeoutMs = options.timeoutMs ?? 2_000;
+		this.#copies = options.copies ?? new ControlCopies(undefined, "config", this.#log);
 		this.shipped = shippedConfig(this.#keep);
 	}
 
@@ -141,7 +148,7 @@ export class TenantConfigs {
 	readonly forPrincipal = (tenant: string | undefined, principal: string): Promise<TenantConfig> => {
 		if (tenant === undefined || tenant === "") return Promise.resolve(this.shipped);
 		const key = `${tenant}\0${principal}`;
-		const entry = this.#entries.get(key);
+		const entry = this.#entries.get(key) ?? this.#saved(key);
 		if (entry !== undefined && entry.checkedAt > 0 && this.#now() - entry.checkedAt < this.#freshMs) return Promise.resolve(entry.config);
 		const inFlight = this.#checking.get(key);
 		if (inFlight !== undefined) return inFlight;
@@ -179,26 +186,43 @@ export class TenantConfigs {
 				signal: AbortSignal.timeout(this.#timeoutMs),
 			});
 			if (response.status === 304 && entry !== undefined) {
-				this.#entries.set(key, { ...entry, checkedAt: this.#now() });
+				const now = this.#now();
+				this.#entries.set(key, { ...entry, okAt: now, checkedAt: now });
 				return entry.config;
 			}
 			if (!response.ok) throw new Error(`control answered ${response.status}`);
-			const config = this.#read(await response.json());
+			const body: unknown = await response.json();
+			const config = this.#read(body);
 			const etag = response.headers.get("etag") ?? undefined;
-			if (this.#entries.size >= MAX_ENTRIES && !this.#entries.has(key)) this.#entries.delete(this.#entries.keys().next().value!);
-			this.#entries.set(key, { ...(etag === undefined ? {} : { etag }), config, checkedAt: this.#now() });
+			const now = this.#now();
+			this.#remember(key, { ...(etag === undefined ? {} : { etag }), config, okAt: now, checkedAt: now });
+			this.#copies.save(key, { ...(etag === undefined ? {} : { etag }), at: now, body });
 			return config;
 		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
+			const now = this.#now();
 			if (entry !== undefined) {
-				this.#log.info("config.using_last_good", { tenant, error: message });
+				this.#copies.failed(tenant, error, entry.okAt, now, "last answer");
 				// Checked again only after freshMs, so an outage costs one slow turn per tenant, not every one.
-				this.#entries.set(key, { ...entry, checkedAt: this.#now() });
+				this.#entries.set(key, { ...entry, checkedAt: now });
 				return entry.config;
 			}
-			this.#log.warn("config.unavailable", { tenant, error: message, using: "the agent as shipped" });
+			this.#copies.failed(tenant, error, 0, now, "the agent as shipped");
 			return this.shipped;
 		}
+	}
+
+	/** The copy on disk, the first time this process needs a principal. Its ETag makes the first check a 304 if nothing changed. */
+	#saved(key: string): Entry | undefined {
+		const saved = this.#copies.load(key);
+		if (saved === undefined) return undefined;
+		const entry: Entry = { ...(saved.etag === undefined ? {} : { etag: saved.etag }), config: this.#read(saved.body), okAt: saved.at, checkedAt: 0 };
+		this.#remember(key, entry);
+		return entry;
+	}
+
+	#remember(key: string, entry: Entry): void {
+		if (this.#entries.size >= MAX_ENTRIES && !this.#entries.has(key)) this.#entries.delete(this.#entries.keys().next().value!);
+		this.#entries.set(key, entry);
 	}
 
 	#read(body: unknown): TenantConfig {
