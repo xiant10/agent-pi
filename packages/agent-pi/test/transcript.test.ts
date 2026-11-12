@@ -9,7 +9,7 @@ afterEach(async () => {
 	running = undefined;
 });
 
-type Line = { id: number; role: string; text?: string; turnId?: string; requestId?: string; name?: string; isError?: boolean; images?: number; at?: number };
+type Line = { id: number; role: string; text?: string; turnId?: string; requestId?: string; name?: string; isError?: boolean; images?: number; at?: number; usage?: { totalTokens: number } };
 type Info = { sessionId: string; busy: boolean; lastActiveAt: number; archived?: boolean; metadata?: Record<string, unknown> };
 
 const limits = (maxSessionsPerUser: number) => ({ ...testConfig().limits, maxSessionsPerUser });
@@ -103,6 +103,11 @@ describe("session.messages", () => {
 		expect((await rpc(running.url, TOKENS.bob, "session.tool", { sessionId, callId: tool.callId })).status).toBe(404);
 		expect((await rpc(running.url, TOKENS.alice, "session.tool", { sessionId, callId: "missing" })).status).toBe(404);
 		expect((await rpc(running.url, TOKENS.alice, "session.tool", { sessionId, callId: "" })).status).toBe(400);
+		// The person's message carries what its turn spent, the reply that only called a tool included.
+		const details = (await rpc(running.url, TOKENS.alice, "session.get", { sessionId })).body.result as { usage: { models: Record<string, { totalTokens: number }> } };
+		const spent = Object.values(details.usage.models).reduce((sum, usage) => sum + usage.totalTokens, 0);
+		expect(spent).toBeGreaterThan(0);
+		expect(messages[0]!.usage?.totalTokens).toBe(spent);
 		await rpc(running.url, TOKENS.alice, "session.update", { sessionId, archived: true });
 		expect((await rpc(running.url, TOKENS.alice, "session.tool", { sessionId, callId: tool.callId })).body.result).toEqual(payload.body.result);
 
@@ -119,6 +124,8 @@ describe("session.messages", () => {
 		const second = (await rpc(running.url, TOKENS.alice, "session.messages", { sessionId, limit: 200, cursor: first.nextCursor })).body.result as { messages: Line[]; nextCursor?: string };
 		expect(second.messages.map((line) => line.text)).toEqual(["a", "one", "b", "two"]);
 		expect(second.nextCursor).toBeUndefined();
+		// No turn's spend is split across pages.
+		for (const line of [...first.messages, ...second.messages].filter((line) => line.role === "user")) expect(line.usage?.totalTokens).toBeGreaterThan(0);
 	});
 
 	it("counts images and leaves their data out", async () => {

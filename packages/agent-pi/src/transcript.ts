@@ -2,12 +2,16 @@ import { CompactionEntry, type EntryRecord, ResetEntry, type UserInput } from "@
 import { NOTE_ENTRY, REPORT_ENTRY, unmarked } from "./agent/tasks.ts";
 import { MessageEntry } from "./plugins/history.ts";
 
+/** Tokens, in the shape of pi-ai's `Usage` without its costs. */
+export type Spent = { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number };
+
 /**
  * One line of a conversation as a client shows it. Tool results carry no content: they can hold what a user may not read.
- * `at` is when the message was written, in Unix milliseconds; `model` is the model that wrote a reply.
+ * `at` is when the message was written, in Unix milliseconds; `model` is the model that wrote a reply. A user's `usage` is
+ * what the turn it started spent, its tools' children included.
  */
 export type TranscriptMessage =
-	| { id: number; role: "user"; text: string; images?: number; turnId?: string; requestId?: string; at?: number }
+	| { id: number; role: "user"; text: string; images?: number; turnId?: string; requestId?: string; at?: number; usage?: Spent }
 	| { id: number; role: "assistant"; text: string; stopReason: string; error?: string; source?: string; at?: number; model?: string }
 	| { id: number; role: "tool"; callId: string; name: string; isError: boolean }
 	/** What a background task told its parent. Sent as a user message so the model reads it, but nobody said it. */
@@ -26,6 +30,7 @@ type ModelMessage = {
 	timestamp?: number;
 	durationMs?: number;
 	model?: string;
+	usage?: Partial<Spent>;
 };
 
 const NOTE_OPEN = "<turn-note>";
@@ -93,4 +98,15 @@ export function transcriptOf(entry: EntryRecord, inputs: ReadonlyMap<number, { t
 		}
 	}
 	return out;
+}
+
+/** What an entry's replies and tool results spent, added to `total`, which is returned. A tool-call-only reply counts too. */
+export function addSpent(total: Spent | undefined, entry: EntryRecord): Spent | undefined {
+	for (const message of (entry.model ?? []) as readonly ModelMessage[]) {
+		if ((message.role !== "assistant" && message.role !== "toolResult") || message.usage === undefined) continue;
+		const sum = total ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 };
+		for (const key of ["input", "output", "cacheRead", "cacheWrite", "totalTokens"] as const) sum[key] += message.usage[key] ?? 0;
+		total = sum;
+	}
+	return total;
 }

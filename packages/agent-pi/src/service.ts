@@ -43,7 +43,7 @@ import type { SessionChanges, SessionInfo, SessionPage, SessionStore } from "./s
 import { type Skill, skillFiles } from "./skills/skills.ts";
 import { customSkill, overrideFlow, type SkillsFor, type TenantSkillContent, type TurnPins } from "./skills/tenant.ts";
 import { activateTools, refreshSkills } from "./tools/activation.ts";
-import { type TranscriptMessage, transcriptOf, withNote } from "./transcript.ts";
+import { addSpent, type Spent, type TranscriptMessage, transcriptOf, withNote } from "./transcript.ts";
 import type { CatalogEntry, CatalogView, ToolCatalog } from "./tools/catalog.ts";
 import { skillOn, type TenantConfig, type TenantConfigs } from "./tenant-config.ts";
 import type { Logger } from "./util/log.ts";
@@ -319,15 +319,25 @@ export class AgentService {
 		const messages: TranscriptMessage[] = [];
 		let oldest = options.before;
 		let cursor: Awaited<ReturnType<Conversation["entries"]>>["next"];
-		// Most entries show nothing, so a page of entries can come up short.
+		// What the turn being read back spent so far; its user message carries the total.
+		let spent: Spent | undefined;
+		// Most entries show nothing, so a page of entries can come up short. A page ends at a turn's start, so no turn's
+		// spend is split.
 		do {
 			const page = await conversation.entries(query, options.limit, cursor, context);
 			for (const entry of page.items) {
 				oldest = entry.id;
-				messages.unshift(...transcriptOf(entry, inputs));
+				const lines = transcriptOf(entry, inputs);
+				spent = addSpent(spent, entry);
+				const asked = lines.find((line) => line.role === "user");
+				if (asked?.role === "user") {
+					if (spent !== undefined) asked.usage = spent;
+					spent = undefined;
+				}
+				messages.unshift(...lines);
 			}
 			cursor = page.next;
-		} while (cursor !== undefined && messages.length < options.limit);
+		} while (cursor !== undefined && (messages.length < options.limit || spent !== undefined));
 		return { messages, ...(cursor === undefined ? {} : { nextCursor: String(oldest) }) };
 	}
 

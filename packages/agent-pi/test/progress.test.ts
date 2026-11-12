@@ -95,7 +95,7 @@ it("reconstructs resumed work and discards timers on an idle snapshot", () => {
 it("generates a request-specific acknowledgement concurrently without recording it in history", async () => {
 	const calls: string[] = [];
 	const response = async (context: unknown) => {
-		const ack = JSON.stringify(context).includes("Write one brief, friendly acknowledgement");
+		const ack = JSON.stringify(context).includes("Write the one-line status an assistant shows");
 		calls.push(ack ? "ack" : "work");
 		await new Promise(resolve => setTimeout(resolve, ack ? 30 : 300));
 		return fauxAssistantMessage([fauxText(ack ? "I’ll compare the vendor prices for you." : "Vendor A costs less.")]);
@@ -117,7 +117,7 @@ it("generates a request-specific acknowledgement concurrently without recording 
 
 it("discards an acknowledgement when the answer wins the race", async () => {
 	const response = async (context: unknown) => {
-		const ack = JSON.stringify(context).includes("Write one brief, friendly acknowledgement");
+		const ack = JSON.stringify(context).includes("Write the one-line status an assistant shows");
 		await new Promise(resolve => setTimeout(resolve, ack ? 300 : 20));
 		return fauxAssistantMessage([fauxText(ack ? "Late acknowledgement" : "Done.")]);
 	};
