@@ -9,7 +9,7 @@ afterEach(async () => {
 	running = undefined;
 });
 
-type Line = { id: number; role: string; text?: string; turnId?: string; requestId?: string; name?: string; isError?: boolean; images?: number };
+type Line = { id: number; role: string; text?: string; turnId?: string; requestId?: string; name?: string; isError?: boolean; images?: number; at?: number };
 type Info = { sessionId: string; busy: boolean; lastActiveAt: number; archived?: boolean; metadata?: Record<string, unknown> };
 
 const limits = (maxSessionsPerUser: number) => ({ ...testConfig().limits, maxSessionsPerUser });
@@ -90,6 +90,8 @@ describe("session.messages", () => {
 		expect(nextCursor).toBeUndefined();
 		expect(messages[0]).toMatchObject({ role: "user", text: "Find it", turnId: "t1", requestId: "r1" });
 		expect(messages.at(-1)).toMatchObject({ role: "assistant", text: "Found it." });
+		// Times are when each message was written, so a client can show them.
+		for (const line of [messages[0]!, messages.at(-1)!]) expect(line.at).toBeGreaterThan(Date.now() - 60_000);
 		const tool = messages.find((line) => line.role === "tool") as Line & { callId: string };
 		expect(tool).toBeDefined();
 		expect(tool).not.toHaveProperty("response");

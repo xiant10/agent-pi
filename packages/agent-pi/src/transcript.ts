@@ -2,10 +2,13 @@ import { CompactionEntry, type EntryRecord, ResetEntry, type UserInput } from "@
 import { NOTE_ENTRY, REPORT_ENTRY, unmarked } from "./agent/tasks.ts";
 import { MessageEntry } from "./plugins/history.ts";
 
-/** One line of a conversation as a client shows it. Tool results carry no content: they can hold what a user may not read. */
+/**
+ * One line of a conversation as a client shows it. Tool results carry no content: they can hold what a user may not read.
+ * `at` is when the message was written, in Unix milliseconds; `model` is the model that wrote a reply.
+ */
 export type TranscriptMessage =
-	| { id: number; role: "user"; text: string; images?: number; turnId?: string; requestId?: string }
-	| { id: number; role: "assistant"; text: string; stopReason: string; error?: string; source?: string }
+	| { id: number; role: "user"; text: string; images?: number; turnId?: string; requestId?: string; at?: number }
+	| { id: number; role: "assistant"; text: string; stopReason: string; error?: string; source?: string; at?: number; model?: string }
 	| { id: number; role: "tool"; callId: string; name: string; isError: boolean }
 	/** What a background task told its parent. Sent as a user message so the model reads it, but nobody said it. */
 	| { id: number; role: "task"; kind: "report" | "note"; taskId: string; name: string; status?: string; text: string }
@@ -20,6 +23,9 @@ type ModelMessage = {
 	toolCallId?: string;
 	toolName?: string;
 	isError?: boolean;
+	timestamp?: number;
+	durationMs?: number;
+	model?: string;
 };
 
 const NOTE_OPEN = "<turn-note>";
@@ -59,7 +65,14 @@ export function transcriptOf(entry: EntryRecord, inputs: ReadonlyMap<number, { t
 		if (message.role === "user") {
 			const images = Array.isArray(message.content) ? message.content.filter((block) => block.type === "image").length : 0;
 			const input = inputs.get(entry.id);
-			out.push({ id: entry.id, role: "user", text: textOf(message.content), ...(images === 0 ? {} : { images }), ...input });
+			out.push({
+				id: entry.id,
+				role: "user",
+				text: textOf(message.content),
+				...(images === 0 ? {} : { images }),
+				...input,
+				...(message.timestamp === undefined ? {} : { at: message.timestamp }),
+			});
 		} else if (message.role === "assistant") {
 			const text = textOf(message.content);
 			if (text === "" && message.errorMessage === undefined) continue;
@@ -71,6 +84,9 @@ export function transcriptOf(entry: EntryRecord, inputs: ReadonlyMap<number, { t
 				stopReason: message.stopReason ?? "stop",
 				...(message.errorMessage === undefined ? {} : { error: message.errorMessage }),
 				...(MessageEntry.is(entry) && typeof source === "string" ? { source } : {}),
+				// A reply's timestamp is when its request started; show when it ended.
+				...(message.timestamp === undefined ? {} : { at: message.timestamp + (message.durationMs ?? 0) }),
+				...(message.model === undefined || message.model === "" || message.model.startsWith("plugin:") ? {} : { model: message.model }),
 			});
 		} else if (message.role === "toolResult") {
 			out.push({ id: entry.id, role: "tool", callId: message.toolCallId ?? "", name: message.toolName ?? "", isError: message.isError === true });
