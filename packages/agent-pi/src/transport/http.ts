@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { type Authenticator, AuthError, type Principal } from "../auth/authenticator.ts";
 import type { RuntimeManifest } from "../runtime.ts";
+import { DOCS_ROUTE } from "../docs.ts";
 import type { AgentService } from "../service.ts";
 import type { Logger } from "../util/log.ts";
 import { traceIdOf } from "../util/tracing.ts";
@@ -24,10 +25,12 @@ export type HttpOptions = {
 	readonly readiness: () => { readonly ready: boolean; readonly detail: unknown };
 	/** For `/v1/runtime`. */
 	readonly runtime: RuntimeManifest;
+	/** This repo's docs at `/docs/mcp`, with no auth (see `docs.ts`). */
+	readonly docs?: (req: IncomingMessage, res: ServerResponse) => void;
 };
 
 /**
- * Routes: `/healthz`, `/readyz` and `/v1/runtime` without auth, the agent endpoint behind the authenticator, 404
+ * Routes: `/healthz`, `/readyz`, `/v1/runtime` and `/docs/mcp` without auth, the agent endpoint behind the authenticator, 404
  * otherwise. Authentication runs before any body is read or any session is touched.
  */
 export function createHttpServer(options: HttpOptions): Server {
@@ -89,6 +92,7 @@ async function route(
 		return writeJson(res, status, { ready, detail });
 	}
 	if (req.method === "GET" && path === "/v1/runtime") return writeJson(res, 200, options.runtime);
+	if (path === DOCS_ROUTE && options.docs !== undefined) return options.docs(req, res);
 	if (path !== options.path && path !== options.mcp?.path) return writeJson(res, 404, { error: "not_found" });
 
 	if (!applyCors(req, res, options.allowedOrigins)) return writeJson(res, 403, { error: "origin_not_allowed" });

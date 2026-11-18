@@ -54,6 +54,7 @@ import {
 } from "./tools/mcp-extension.ts";
 import { TenantConnectors } from "./tools/tenant.ts";
 import { capabilitiesOf, runtimeManifest } from "./runtime.ts";
+import { agentPiDocs } from "./docs.ts";
 import { createHttpServer } from "./transport/http.ts";
 import { McpEndpoint } from "./transport/mcp.ts";
 import { CORE_METHODS } from "./transport/streamable-http.ts";
@@ -421,7 +422,15 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 
 	const authenticator = withLiveGrants(plugins.authenticator(await container.get(Services.authenticator)), grants);
 	const mcpEndpoint = config.mcpEndpoint;
+	let docs: ReturnType<typeof agentPiDocs> | undefined;
+	try {
+		docs = agentPiDocs();
+	} catch (error) {
+		// An install without the repo's docs/, such as from npm, serves none.
+		log.warn("docs.unavailable", { error: error instanceof Error ? error.message : String(error) });
+	}
 	const server = createHttpServer({
+		...(docs === undefined ? {} : { docs }),
 		authenticator,
 		service,
 		log,
