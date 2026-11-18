@@ -1,8 +1,16 @@
+---
+title: "Building agents on agent-pi"
+audience: consumer
+kind: guide
+status: current
+summary: "Build a product on agent-pi: an agent app, its configuration, skills, tools and plugins, then test and ship it."
+---
+
 # Building agents on agent-pi
 
 This guide is for developers who build a product on the `agent-pi` package: a new agent app, its configuration,
 skills, tools, and plugins, and how to test and ship it. For why the harness works the way it does, read
-[`design.md`](design.md); for the wire protocol, the [README](../README.md#protocol).
+[`design.md`](../design.md); for the wire protocol, the [README](../../README.md#protocol).
 
 - [The split: harness and app](#the-split-harness-and-app)
 - [Create an app](#create-an-app)
@@ -208,7 +216,7 @@ It becomes the catalog tool `agent_research`, which takes a `task`. Offer it lik
 `tools`, or search. `tools` is the child's starting set, and empty means none. A child cannot delegate further, and
 `limits.maxSubagentsPerSession` (default 3) caps how many run at once. `session.get` lists a session's `subagents`; a
 client can read those ids with `session.get` and the `GET` event stream, but cannot drive them. The server name `agents`
-is reserved. See [delegation.md](delegation.md) for the design.
+is reserved. See [delegation.md](../delegation.md) for the design.
 
 With `"background": true`, the tool returns at once and the child reports when its turn ends, waking the parent if it is
 idle. The parent gets `task_send`, `task_list`, and `task_stop`, and the child `task_note`. `idleTtlMs` and
@@ -217,7 +225,7 @@ idle. The parent gets `task_send`, `task_list`, and `task_stop`, and the child `
 `limits.maxUnattendedTokens` (default 1000000) bound a session. `session.get` gives what tasks spent as `taskUsage`, apart
 from `usage`. A profile with `"taskReports": "note"` holds reports for the next user input, as a voice agent may want.
 Clients read `tasks` from `session.get` and `task.updated` events; a woken run streams only to a `GET` stream, so a client
-that wants unprompted answers must hold one. See [async-tasks.md](async-tasks.md).
+that wants unprompted answers must hold one. See [async-tasks.md](../async-tasks.md).
 
 ## Offering an agent over MCP
 
@@ -232,7 +240,7 @@ An agent can offer itself to MCP clients and other agents. Set `mcpEndpoint`:
 `/mcp` (or `path`) then serves Streamable HTTP behind the agent's authenticator. Each tool takes a `task`, runs it in a
 one-shot session under the chosen profile, and returns the answer. Plugins, limits, and grants apply as on `/agent`.
 Another agent calls it with an `mcpServers` entry; add `"agentContext": true` to keep its work in the caller's trace and
-count hops. See [delegation.md](delegation.md).
+count hops. See [delegation.md](../delegation.md).
 
 ## Tools: MCP servers and the active set
 
@@ -339,7 +347,7 @@ events:    mapEvent per client event
 shutdown:  dispose (reverse order)
 ```
 
-The full member list is in the [README's plugin reference](../README.md#plugin-reference) and the doc comments of
+The full member list is in the [README's plugin reference](../../README.md#plugin-reference) and the doc comments of
 `AgentPlugin` (`packages/agent-pi/src/plugins/types.ts`). The recipes below cover the common jobs.
 
 ### Ready-made plugins
@@ -707,7 +715,7 @@ traces use it as `service.name` unless `OTEL_SERVICE_NAME` is set.
 
 ## Calling the agent from a client
 
-The [README](../README.md#protocol) has the full method and event tables. The behaviors clients most often get wrong:
+The [README](../../README.md#protocol) has the full method and event tables. The behaviors clients most often get wrong:
 
 - **Send a `requestId`** with every `session.prompt`, `session.steer`, and `session.interrupt`, and reuse it when
   retrying after a network error. The retry returns the first outcome instead of asking twice.

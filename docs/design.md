@@ -1,3 +1,11 @@
+---
+title: "agent-pi design"
+audience: contributor
+kind: design
+status: current
+summary: "Why agent-pi is shaped as it is: durable sessions, auth, skills, MCP tools and a speakable output stream."
+---
+
 # agent-pi design
 
 A multi-user agent harness on `@earendil-works/pi-durable`, reached over Streamable HTTP, with JWT auth, skills that

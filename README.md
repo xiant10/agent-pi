@@ -32,7 +32,7 @@ Dockerfile             one image holding every agent; AGENT_CONFIG picks the age
 ```
 
 A new agent is another `apps/<name>` with its own config, prompts, and skills. It runs on the shared runtime, or on its
-own entry point if it has plugins of its own (see the [developer guide](docs/developer-guide.md#create-an-app)).
+own entry point if it has plugins of its own (see the [developer guide](docs/guides/developer-guide.md#create-an-app)).
 
 ## Quick start
 

@@ -1,3 +1,11 @@
+---
+title: "Progress feedback"
+audience: consumer
+kind: design
+status: current
+summary: "Progress feedback: the temporary status events an agent emits while it works."
+---
+
 # Progress feedback
 
 ## Purpose

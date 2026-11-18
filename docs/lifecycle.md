@@ -1,3 +1,11 @@
+---
+title: "Lifecycle and plugin hook points"
+audience: consumer
+kind: reference
+status: current
+summary: "One agent from start to shutdown, and every hook point where an AgentPlugin can step in."
+---
+
 # Lifecycle and plugin hook points
 
 This document follows one agent from process start to shutdown and marks where an `AgentPlugin` can step in. Hook

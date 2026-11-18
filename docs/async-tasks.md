@@ -1,3 +1,11 @@
+---
+title: "Asynchronous tasks: parent and child messaging"
+audience: consumer
+kind: design
+status: current
+summary: "Asynchronous sub-agent tasks: how a parent and its children message each other while both run."
+---
+
 # Asynchronous tasks: parent and child messaging
 
 Status: built, in `agent/tasks.ts`. Extends the sub-agents in [delegation.md](delegation.md).
