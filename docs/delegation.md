@@ -1,3 +1,11 @@
+---
+title: "Delegation: agents as tools"
+audience: consumer
+kind: design
+status: current
+summary: "How one agent hands a task to another, as a sub-agent tool or across harnesses."
+---
+
 # Delegation: agents as tools
 
 How one agent hands a task to another. There are two features, for two boundaries:

@@ -1,3 +1,11 @@
+---
+title: "Running without a real model"
+audience: consumer
+kind: guide
+status: current
+summary: "Run agent-pi and its tests offline with a mock model and mock MCP server, no API keys."
+---
+
 # Running without a real model
 
 Everything here runs offline, with no API keys. agent-pi's tests and the scripts in `scripts/mock/` run the real server,
@@ -69,7 +77,7 @@ npm run mock:compare -- <ref before the upgrade>
 It checks the ref out in a temporary worktree, removed afterwards, and exits 1 if the traces differ. Text chunks split
 differently around the scripts' fixed sleeps from run to run, so the comparison leaves them out, along with how much
 aborted text got through. What remains is behaviour: statuses, event order, results, and model context.
-`docs/AGENT-PI-PROVIDER.md` in `t10-livekit-agent` depends on it, so update that document when a trace changes.
+`docs/agent-pi-provider.md` in `t10-livekit-agent` depends on it, so update that document when a trace changes.
 
 A migration is one-way when durable's schema changes, so `migration.mjs` proves only the upgrade. To see a rollback
 refused, run its `reopen` phase with the older checkout on the migrated file.

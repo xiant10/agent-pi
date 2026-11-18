@@ -1,6 +1,14 @@
+---
+title: "agent-pi API"
+audience: consumer
+kind: reference
+status: current
+summary: "HTTP endpoints, JSON-RPC methods, events and errors of an agent-pi harness, beyond the agent contract."
+---
+
 # agent-pi API
 
-The reference for calling an agent-pi harness: its HTTP endpoints, JSON-RPC methods, events and errors. It implements the agent contract in the t10 workspace's [`contracts/agent/README.md`](../../contracts/agent/README.md); this page adds what agent-pi offers beyond it. The [README](../README.md#protocol) has the short form and a voice client's flow, and [`developer-guide.md`](developer-guide.md#calling-the-agent-from-a-client) lists what clients most often get wrong.
+The reference for calling an agent-pi harness: its HTTP endpoints, JSON-RPC methods, events and errors. It implements the agent contract in the t10 workspace's [`contracts/agent/README.md`](../../contracts/agent/README.md); this page adds what agent-pi offers beyond it. The [README](../README.md#protocol) has the short form and a voice client's flow, and [`developer-guide.md`](guides/developer-guide.md#calling-the-agent-from-a-client) lists what clients most often get wrong.
 
 ## Reaching it
 

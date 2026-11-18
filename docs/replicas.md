@@ -1,3 +1,11 @@
+---
+title: "Replicas"
+audience: operator
+kind: design
+status: current
+summary: "How agent-pi replicas own sessions, how callers find them, and what that means for scaling."
+---
+
 # Replicas
 
 How `agent-pi` replicas own sessions, how callers find them, and what that means for scaling. [`design.md`](design.md), requirement "R5: multi-user and scaling", is how a replica guards its storage, and the workspace's [`ARCHITECTURE.md`](../../ARCHITECTURE.md), "Communication and scaling", places it among the other components.
