@@ -133,3 +133,7 @@ A JSON-RPC error has an HTTP status, a JSON-RPC code, and `data.code`:
 | 429 | `rate_limited` | Wait `Retry-After` seconds |
 | 503 | `auth_unavailable` | Tokens can't be checked right now |
 | 500 | `internal` | Something failed here |
+
+## Docs for coding agents
+
+`POST /docs/mcp` serves this repo's docs for people building on t10, over MCP and with no token, as the workspace's [docs contract](../../contracts/docs/README.md) describes. `node packages/agent-pi/src/docs.ts <addr>` serves only that route, for the contract's suite.

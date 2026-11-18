@@ -15,10 +15,15 @@ COPY apps apps
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 
 COPY packages/agent-pi/src packages/agent-pi/src
+# Served to coding agents at /docs/mcp. .dockerignore leaves out docs/records.
+COPY docs docs
 
 # SQLite storage lives on a volume so sessions and unfinished runs survive restarts. Give each agent its own volume.
 RUN mkdir -p /data && chown node:node /data
 VOLUME /data
+# The commit the image was built from, which /docs/mcp reports.
+ARG VERSION=dev
+ENV AGENT_PI_VERSION=${VERSION}
 ENV AGENT_DATA_DIR=/data \
     PORT=18100
 
