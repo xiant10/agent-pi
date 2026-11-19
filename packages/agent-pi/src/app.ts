@@ -32,7 +32,7 @@ import type { AppConfig, McpEndpointConfig } from "./config.ts";
 import { HubRegistry } from "./events/hub.ts";
 import { defaultTransport, McpManager } from "./mcp/manager.ts";
 import { Container } from "./plugins/container.ts";
-import { IdentityRegistry, identityExtension } from "./identity.ts";
+import { IdentityRegistry, identityExtension, modelToken } from "./identity.ts";
 import { PluginRunner } from "./plugins/runner.ts";
 import { type ConfiguredModels, type McpTransportFactory, Services } from "./plugins/services.ts";
 import type { AgentPlugin, PluginCatalog } from "./plugins/types.ts";
@@ -375,9 +375,11 @@ export async function startAgent(config: AppConfig, options: StartOptions = {}):
 	const progressRef = config.progressModel === undefined ? undefined : refs.get(config.progressModel);
 	const progressModel = progressRef === undefined ? undefined : models.getModel(progressRef.provider, progressRef.modelId);
 	const service = new AgentService({
-		...(progressModel === undefined ? {} : { acknowledgement: async (input: string, sessionId: string, turnId: string, principal: import("./auth/authenticator.ts").Principal, signal: AbortSignal) => {
+		...(progressModel === undefined ? {} : { acknowledgement: async (input: string, sessionId: string, turnId: string, principal: import("./auth/authenticator.ts").Principal, signal: AbortSignal, conversationId: ConversationId) => {
 			const providerSession = `ack-${crypto.randomUUID()}`;
-			identity.set(providerSession, { agent: config.agent, sessionId, turnId, userId: principal.userId, ...(principal.tenantId === undefined ? {} : { tenantId: principal.tenantId }), ...(principal.displayName === undefined ? {} : { userName: principal.displayName }), principal });
+			// The run's token, as the turn's own model calls send it: a tenant with its own model keys needs it.
+			const runToken = grants === undefined ? undefined : await modelToken((id) => grants.token(id), conversationId);
+			identity.set(providerSession, { agent: config.agent, sessionId, turnId, userId: principal.userId, ...(principal.tenantId === undefined ? {} : { tenantId: principal.tenantId }), ...(principal.displayName === undefined ? {} : { userName: principal.displayName }), principal, ...(runToken === undefined ? {} : { runToken }) });
 			const reply = await models.completeSimple(progressModel, {
 				systemPrompt: ACKNOWLEDGEMENT_PROMPT,
 				messages: [{ role: "user", content: input.slice(0, 8000), timestamp: Date.now() }],
