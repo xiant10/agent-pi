@@ -408,7 +408,7 @@ export function identityExtension(
  * The run's token for a model call, or none: a conversation with no grant, a grant that doesn't list the model gateway,
  * or an auth outage. The gateway then trusts the tenant header as before, unless it requires a token.
  */
-async function modelToken(runToken: (conversationId: ConversationId) => Promise<string>, conversationId: ConversationId): Promise<string | undefined> {
+export async function modelToken(runToken: (conversationId: ConversationId) => Promise<string>, conversationId: ConversationId): Promise<string | undefined> {
 	try {
 		const token = await runToken(conversationId);
 		return forModelGateway(token) ? token : undefined;

@@ -50,7 +50,7 @@ import type { Logger } from "./util/log.ts";
 import { errorClass, SESSION_ATTRIBUTE, startSpan, traceIdOf, type TraceSpan } from "./util/tracing.ts";
 
 export type ServiceDeps = {
-	readonly acknowledgement?: (input: string, sessionId: string, turnId: string, principal: Principal, signal: AbortSignal) => Promise<string>;
+	readonly acknowledgement?: (input: string, sessionId: string, turnId: string, principal: Principal, signal: AbortSignal, conversationId: ConversationId) => Promise<string>;
 	readonly harness: Harness;
 	readonly store: SessionStore;
 	readonly catalog: ToolCatalog;
@@ -667,7 +667,7 @@ export class AgentService {
 				const timeout = setTimeout(() => abort.abort(), 5000);
 				timeout.unref();
 				void submission.wait(BACKGROUND_CONTEXT).then(() => abort.abort(), () => abort.abort());
-				void this.#deps.acknowledgement(textOf(submitted), sessionId, turn, principal, abort.signal).then(async text => {
+				void this.#deps.acknowledgement(textOf(submitted), sessionId, turn, principal, abort.signal, conversation.id).then(async text => {
 					if (abort.signal.aborted) return;
 					const hub = await this.hub(principal, sessionId, BACKGROUND_CONTEXT);
 					if (!abort.signal.aborted) hub.acknowledge(submission.id, text);
