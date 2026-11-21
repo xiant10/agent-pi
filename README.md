@@ -45,7 +45,7 @@ Docker (build context is the repository root):
 
 ```bash
 cp .env.example .env   # set JWT_* and LLM_* values
-docker compose -f apps/assistant/docker-compose.yml up -d --build
+docker compose -f apps/assistant/compose.yml up -d --build
 curl localhost:9800/readyz
 ```
 

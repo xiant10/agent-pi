@@ -21,7 +21,7 @@ services:
     <<: *hardening
     build:
       context: .
-    image: ${ASSISTANT_IMAGE:-assistant:latest}
+    image: ${ASSISTANT_IMAGE:-agent-pi:latest}
     env_file:
       - path: .env
         required: false

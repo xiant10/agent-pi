@@ -2,7 +2,7 @@ services:
   agent:
     build:
       context: ../..
-    image: assistant:latest
+    image: agent-pi:latest
     restart: unless-stopped
     env_file:
       - path: ../../.env
