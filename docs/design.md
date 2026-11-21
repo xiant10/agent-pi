@@ -18,7 +18,7 @@ load tool schemas on demand, hundreds of MCP tools, and an output stream a voice
 | R1 | Clients connect over Streamable HTTP | `transport/streamable-http.ts` |
 | R2 | Clients can steer a running agent | `session.steer`, `session.interrupt` |
 | R3 | Skills, and skill configs that load tool schemas dynamically | `skills/`, `tools/activation.ts` |
-| R4 | Runs in Docker | `Dockerfile`, `docker-compose.yml`, `/healthz`, graceful shutdown |
+| R4 | Runs in Docker | `Dockerfile`, `compose.yml`, `/healthz`, graceful shutdown |
 | R5 | Many users' sessions at once | one Harness, one Conversation per session, per-user limits |
 | R6 | JWT verified before any agent work, with an extension hook | `auth/`, plugins' `authenticate` |
 | R7 | Fast enough for voice, still able to reason | profiles, speech segmentation, tool preloading, prompt caching |

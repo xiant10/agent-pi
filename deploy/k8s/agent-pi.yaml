@@ -50,7 +50,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: agent-pi
-          image: assistant:latest
+          image: agent-pi:latest
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
